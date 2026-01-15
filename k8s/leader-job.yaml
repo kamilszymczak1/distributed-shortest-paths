@@ -18,14 +18,11 @@ spec:
           image: graph-leader:v1
           imagePullPolicy: Never  # Use local images (minikube)
           env:
-            - name: WORKER_PORT
-              value: "9090"
-            - name: NUM_WORKERS
-              value: "3"
-            - name: WORKER_SERVICE_NAME
-              value: "worker"  # K8s headless service name
             - name: NAMESPACE
               value: "graph-dist"
+          envFrom:
+            - configMapRef:
+                name: graph-config
           resources:
             requests:
               memory: "512Mi"

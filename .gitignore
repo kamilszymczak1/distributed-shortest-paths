@@ -4,3 +4,5 @@ worker/dependency-reduced-pom.xml
 common/target/*
 leader/target/*
 worker/target/*
+
+.vscode
