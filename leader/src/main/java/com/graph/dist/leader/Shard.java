@@ -100,8 +100,7 @@ public class Shard {
         int medianIndex = sortedNodes.size() / 2;
         
         // Ensure we don't create empty shards
-        if (medianIndex <= 0) medianIndex = 1;
-        if (medianIndex >= sortedNodes.size()) medianIndex = sortedNodes.size() - 1;
+        assert medianIndex > 0 && medianIndex < sortedNodes.size();
         
         List<Integer> leftNodes = new ArrayList<>(sortedNodes.subList(0, medianIndex));
         List<Integer> rightNodes = new ArrayList<>(sortedNodes.subList(medianIndex, sortedNodes.size()));
@@ -139,8 +138,7 @@ public class Shard {
         int medianIndex = sortedNodes.size() / 2;
         
         // Ensure we don't create empty shards
-        if (medianIndex <= 0) medianIndex = 1;
-        if (medianIndex >= sortedNodes.size()) medianIndex = sortedNodes.size() - 1;
+        assert medianIndex > 0 && medianIndex < sortedNodes.size();
         
         List<Integer> bottomNodes = new ArrayList<>(sortedNodes.subList(0, medianIndex));
         List<Integer> topNodes = new ArrayList<>(sortedNodes.subList(medianIndex, sortedNodes.size()));
