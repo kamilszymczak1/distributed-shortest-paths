@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: worker
+  namespace: graph-dist
+  labels:
+    app: graph-worker
+spec:
+  serviceName: worker
+  replicas: 3  # NUM_WORKERS - can be scaled
+  selector:
+    matchLabels:
+      app: graph-worker
+  template:
+    metadata:
+      labels:
+        app: graph-worker
+    spec:
+      containers:
+        - name: worker
+          image: graph-worker:v1
+          imagePullPolicy: Never  # Use local images (minikube)
+          ports:
+            - containerPort: 9090
+              name: grpc
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+---
+# Headless Service for StatefulSet DNS resolution
+# This allows workers to be addressed as worker-0.worker, worker-1.worker, etc.
+apiVersion: v1
+kind: Service
+metadata:
+  name: worker
+  namespace: graph-dist
+  labels:
+    app: graph-worker
+spec:
+  clusterIP: None  # Headless service
+  selector:
+    app: graph-worker
+  ports:
+    - port: 9090
+      targetPort: 9090
+      name: grpc

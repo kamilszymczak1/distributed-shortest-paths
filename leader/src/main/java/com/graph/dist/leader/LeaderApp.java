@@ -97,11 +97,25 @@ public class LeaderApp {
         });
 
         // 4. Send to Workers
+        String workerServiceName = System.getenv().getOrDefault("WORKER_SERVICE_NAME", "worker");
+        String namespace = System.getenv().getOrDefault("NAMESPACE", "");
+        int workerPort = Integer.parseInt(System.getenv().getOrDefault("WORKER_PORT", "9090"));
+        
         for (int i = 0; i < numWorkers; i++) {
-            String host = "worker-" + i; // docker-compose service name
+            // For Kubernetes StatefulSet: worker-0.worker.graph-dist.svc.cluster.local
+            // For Docker Compose: worker-0
+            String host;
+            if (namespace.isEmpty()) {
+                // Docker Compose mode
+                host = "worker-" + i;
+            } else {
+                // Kubernetes mode: <pod-name>.<service-name>.<namespace>.svc.cluster.local
+                host = "worker-" + i + "." + workerServiceName + "." + namespace + ".svc.cluster.local";
+            }
+            
             System.out.println("Sending shard " + i + " to " + host + " with "
                     + builders.get(i).getNodesCount() + " nodes.");
-            WorkerClient client = new WorkerClient(host, 9090);
+            WorkerClient client = new WorkerClient(host, workerPort);
             client.loadShard(builders.get(i).build());
             client.shutdown();
         }
