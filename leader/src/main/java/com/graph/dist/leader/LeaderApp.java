@@ -6,6 +6,8 @@ import io.grpc.stub.StreamObserver;
 import com.graph.dist.proto.LeaderServiceGrpc;
 import com.graph.dist.proto.ShardRequest;
 import com.graph.dist.proto.ShardData;
+import com.graph.dist.utils.Point;
+import java.util.Map;
 
 public class LeaderApp {
 
@@ -19,11 +21,13 @@ public class LeaderApp {
     public static void main(String[] args) throws Exception {
         System.out.println("Leader starting...");
 
-        DimacsParser.GraphData graphData = null;
+        Map<Integer, Point> coords = null;
+        String coPath = "/data/graph.co.gz";
+        String grPath = "/data/graph.gr.gz";
 
         try {
-            graphData = DimacsParser.parse("/data/graph.co.gz", "/data/graph.gr.gz");
-            System.out.println("Graph parsed with " + graphData.coords.size() + " coordinates.");
+            coords = DimacsParser.parseCoordinates(coPath);
+            System.out.println("Graph coordinates parsed with " + coords.size() + " coordinates.");
         } catch (Exception e) {
             System.err.println("Failed to parse graph: " + e.getMessage());
             return;
@@ -32,7 +36,7 @@ public class LeaderApp {
         int numWorkers = getNumWorkers();
 
         // Create shards
-        shardManager = new ShardManager(graphData, numWorkers);
+        shardManager = new ShardManager(coords, grPath, numWorkers);
         shardManager.createShards();
         
         System.out.println("Leader initialization complete. Starting gRPC server on port 9090...");

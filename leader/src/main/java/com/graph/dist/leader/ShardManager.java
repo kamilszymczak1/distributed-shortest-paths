@@ -2,6 +2,8 @@ package com.graph.dist.leader;
 
 import com.graph.dist.utils.Point;
 import java.util.*;
+import java.io.*;
+import java.util.zip.GZIPInputStream;
 
 /**
  * Manages the creation and distribution of shards.
@@ -9,7 +11,8 @@ import java.util.*;
  */
 public class ShardManager {
     
-    private final DimacsParser.GraphData graphData;
+    private final Map<Integer, Point> coords;
+    private final String edgeFilePath;
     private final int numWorkers;
     
     // Stores the final shards indexed by shard ID (worker index)
@@ -18,8 +21,9 @@ public class ShardManager {
     // Maps node ID to shard ID for quick lookup
     private Map<Integer, Integer> nodeToShardId;
 
-    public ShardManager(DimacsParser.GraphData graphData, int numWorkers) {
-        this.graphData = graphData;
+    public ShardManager(Map<Integer, Point> coords, String edgeFilePath, int numWorkers) {
+        this.coords = coords;
+        this.edgeFilePath = edgeFilePath;
         this.numWorkers = numWorkers;
     }
 
@@ -43,7 +47,7 @@ public class ShardManager {
         );
 
         // Start with a single shard containing all nodes
-        Shard initialShard = Shard.createInitialShard(graphData.coords);
+        Shard initialShard = Shard.createInitialShard(coords);
         shardQueue.add(initialShard);
 
         System.out.println("Initial shard: " + initialShard);
@@ -67,7 +71,7 @@ public class ShardManager {
                                ", height=" + largestShard.getHeight() + ")");
 
             // Split the shard
-            Shard[] newShards = largestShard.split(graphData.coords);
+            Shard[] newShards = largestShard.split(coords);
             
             System.out.println("  -> Created: " + newShards[0] + " and " + newShards[1]);
 
@@ -194,7 +198,7 @@ public class ShardManager {
 
         // Add nodes with their coordinates
         for (int nodeId : shard.nodeIds) {
-            Point pt = graphData.coords.get(nodeId);
+            Point pt = coords.get(nodeId);
             builder.addNodes(
                 com.graph.dist.proto.Node.newBuilder()
                     .setId(nodeId)
@@ -206,18 +210,33 @@ public class ShardManager {
 
         // Add edges that originate from nodes in this shard
         Set<Integer> nodeSet = new HashSet<>(shard.nodeIds);
-        for (DimacsParser.Edge edge : graphData.edges) {
-            if (nodeSet.contains(edge.from)) {
-                int toShard = getShardIdForNode(edge.to);
-                builder.addEdges(
-                    com.graph.dist.proto.Edge.newBuilder()
-                        .setFrom(edge.from)
-                        .setTo(edge.to)
-                        .setToShard(toShard)
-                        .setWeight(edge.weight)
-                        .build()
-                );
+        try (BufferedReader br = new BufferedReader(
+                new InputStreamReader(new GZIPInputStream(new FileInputStream(edgeFilePath))))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                if (line.startsWith("a ")) {
+                    String[] p = line.split("\\s+");
+                    int from = Integer.parseInt(p[1]);
+                    
+                    if (nodeSet.contains(from)) {
+                        int to = Integer.parseInt(p[2]);
+                        int weight = Integer.parseInt(p[3]);
+                        int toShard = getShardIdForNode(to);
+                        
+                        builder.addEdges(
+                            com.graph.dist.proto.Edge.newBuilder()
+                                .setFrom(from)
+                                .setTo(to)
+                                .setToShard(toShard)
+                                .setWeight(weight)
+                                .build()
+                        );
+                    }
+                }
             }
+        } catch (IOException e) {
+            System.err.println("Error reading edge file: " + e.getMessage());
+            // In a real app we might want to throw or handle this better
         }
 
         return builder.build();
