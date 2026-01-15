@@ -13,8 +13,11 @@ public class ApiHandler {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public void handleShortestPath(Context ctx) throws Exception {
+        System.out.println("Received shortest path request: " + ctx.queryParamMap());
         if (!lock.tryLock()) {
-            ctx.status(503).json(Collections.singletonMap("error", "Another query is already in progress. Please try again later."));
+            System.out.println("Another query is already in progress. Rejecting this request.");
+            ctx.status(503).json(
+                    Collections.singletonMap("error", "Another query is already in progress. Please try again later."));
             return;
         }
 
@@ -27,10 +30,31 @@ public class ApiHandler {
                 return;
             }
 
-            int fromNode = Integer.parseInt(from);
-            int toNode = Integer.parseInt(to);
+            System.out.println("Processing shortest path from " + from + " to " + to);
+
+            int fromNode;
+            int toNode;
+            try {
+                fromNode = Integer.parseInt(from);
+                toNode = Integer.parseInt(to);
+
+                if (fromNode < 0 || toNode < 0) {
+                    throw new NumberFormatException("Node IDs must be non-negative integers.");
+                }
+            } catch (NumberFormatException e) {
+                System.out.println("Invalid 'from' or 'to' parameter: " + e.getMessage());
+                ctx.status(400).json(
+                        Collections.singletonMap("error",
+                                "Invalid 'from' or 'to' parameter. Must be valid non-negative integers."));
+                return;
+            }
+
+            // TODO: Validate that fromNode and toNode exist in the graph
 
             ShortestPathResult result = findShortestPath(fromNode, toNode);
+
+            System.out
+                    .println("Shortest path result: distance=" + result.distance + ", path=" + result.path);
 
             ctx.json(result);
         } finally {
