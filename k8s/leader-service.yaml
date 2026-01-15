@@ -8,8 +8,13 @@ metadata:
 spec:
   selector:
     app: graph-leader
+  type: LoadBalancer
   ports:
     - port: 9090
       targetPort: 9090
       protocol: TCP
       name: grpc
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+      name: http

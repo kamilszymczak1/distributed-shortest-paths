@@ -34,6 +34,8 @@ COPY data/graph.gr.gz /data/graph.gr.gz
 
 # Expose the gRPC port
 EXPOSE 9090
+# Expose the web server port
+EXPOSE 8080
 
 # Run the application
 ENTRYPOINT ["java", "-jar", "app.jar"]

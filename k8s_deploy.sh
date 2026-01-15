@@ -37,6 +37,20 @@ kubectl apply -f k8s/leader-job.yaml
 echo ""
 echo "=== Deployment complete! ==="
 echo ""
+echo "Starting port-forwarding for the leader API..."
+
+# Wait for the leader pod to be running
+echo "Waiting for leader to start..."
+kubectl wait --namespace graph-dist --for=condition=Ready pod -l app=graph-leader --timeout=120s
+
+POD_NAME=$(kubectl get pods --namespace graph-dist -l "app=graph-leader" -o jsonpath="{.items[0].metadata.name}")
+kubectl port-forward --namespace graph-dist $POD_NAME 8080:8080 > /dev/null 2>&1 &
+PORT_FORWARD_PID=$!
+
+echo "The leader API is now available at http://localhost:8080"
+echo "Port-forwarding is running in the background with PID: $PORT_FORWARD_PID"
+echo "You can stop it with: kill $PORT_FORWARD_PID"
+echo ""
 echo "Useful commands:"
 echo "  kubectl get pods -n graph-dist              # View all pods"
 echo "  kubectl logs -n graph-dist -l app=graph-leader -f  # Follow leader logs"
