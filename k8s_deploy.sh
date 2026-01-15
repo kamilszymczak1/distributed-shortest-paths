@@ -18,6 +18,9 @@ kubectl apply -f k8s/namespace.yaml
 echo "Creating ConfigMap..."
 kubectl apply -f k8s/configmap.yaml
 
+echo "Creating Persistent Volume and Claim..."
+kubectl apply -f k8s/pvc.yaml
+
 echo "Deploying workers..."
 kubectl apply -f k8s/worker-statefulset.yaml
 

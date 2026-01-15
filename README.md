@@ -67,7 +67,6 @@ This is the recommended approach if you plan to deploy to Google Cloud later.
 #### 1. Start minikube
 
 ```bash
-sudo usermod -aG docker $USER && newgrp docker
 ./minikube_start.sh
 ```
 

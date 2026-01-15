@@ -26,3 +26,4 @@ spec:
     - ReadOnlyMany
   hostPath:
     path: /data/graph  # This will be mounted from host in minikube
+    type: DirectoryOrCreate
