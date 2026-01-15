@@ -28,6 +28,14 @@ message ShardResponse {
   string message = 2;
 }
 
+message ShardRequest {
+    int32 worker_id = 1;
+}
+
 service GraphService {
   rpc LoadShard(ShardData) returns (ShardResponse);
+}
+
+service LeaderService {
+    rpc GetShard(ShardRequest) returns (ShardData);
 }

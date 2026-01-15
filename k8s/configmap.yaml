@@ -7,3 +7,6 @@ data:
   NUM_WORKERS: "3"
   WORKER_PORT: "9090"
   WORKER_SERVICE_NAME: "worker"
+  LEADER_SERVICE_NAME: "leader"
+  LEADER_PORT: "9090"
+  NAMESPACE: "graph-dist"

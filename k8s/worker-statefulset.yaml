@@ -20,6 +20,9 @@ spec:
         - name: worker
           image: graph-worker:v1
           imagePullPolicy: Never  # Use local images (minikube)
+          envFrom:
+            - configMapRef:
+                name: graph-config
           ports:
             - containerPort: 9090
               name: grpc

@@ -18,6 +18,9 @@ kubectl apply -f k8s/namespace.yaml
 echo "Creating ConfigMap..."
 kubectl apply -f k8s/configmap.yaml
 
+echo "Creating leader service (DNS entry for leader)..."
+kubectl apply -f k8s/leader-service.yaml
+
 echo "Creating Persistent Volume and Claim..."
 kubectl apply -f k8s/pvc.yaml
 
