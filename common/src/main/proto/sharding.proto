@@ -8,15 +8,19 @@ message Node {
   int32 y = 3;
 }
 
+// Edges are directed. The shard of the 'from' node
+// is implied by the shard data containing this edge.
 message Edge {
-  int32 u = 1;
-  int32 v = 2;
-  int32 weight = 3;
+  int32 from = 1;
+  int32 to = 2;
+  int32 to_shard = 3;
+  int32 weight = 4;
 }
 
 message ShardData {
   int32 shard_id = 1;
   repeated Node nodes = 2;
+  repeated Edge edges = 3;
 }
 
 message ShardResponse {
