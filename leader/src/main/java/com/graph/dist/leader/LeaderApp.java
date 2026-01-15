@@ -1,9 +1,14 @@
 package com.graph.dist.leader;
 
+import io.grpc.Server;
+import io.grpc.ServerBuilder;
+import io.grpc.stub.StreamObserver;
+import com.graph.dist.proto.LeaderServiceGrpc;
+import com.graph.dist.proto.ShardRequest;
+import com.graph.dist.proto.ShardData;
+
 public class LeaderApp {
 
-    // Keep the shard manager as a static field so shards are remembered
-    // and can be resent if a worker pod dies and restarts
     private static ShardManager shardManager;
 
     public static int getNumWorkers() {
@@ -11,7 +16,7 @@ public class LeaderApp {
         return Integer.parseInt(numWorkers);
     }
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
         System.out.println("Leader starting...");
 
         DimacsParser.GraphData graphData = null;
@@ -26,33 +31,41 @@ public class LeaderApp {
 
         int numWorkers = getNumWorkers();
 
-        // Create and distribute shards using the new spatial partitioning algorithm
+        // Create shards
         shardManager = new ShardManager(graphData, numWorkers);
         shardManager.createShards();
-        shardManager.distributeAllShards();
-
-        System.out.println("Leader initialization complete. Shards are stored for potential resending.");
+        
+        System.out.println("Leader initialization complete. Starting gRPC server on port 9090...");
+        
+        // Start gRPC server to serve shards
+        Server server = ServerBuilder.forPort(9090)
+                .addService(new LeaderServiceImpl())
+                .maxInboundMessageSize(50 * 1024 * 1024) 
+                .build();
+                
+        server.start();
+        System.out.println("Leader server started. Waiting for workers to connect...");
+        server.awaitTermination();
     }
 
-    /**
-     * Returns the shard manager, which can be used to resend shards to workers
-     * if they restart.
-     */
-    public static ShardManager getShardManager() {
-        return shardManager;
-    }
-
-    /**
-     * Resends a shard to a specific worker. Useful when a worker pod restarts.
-     * 
-     * @param workerId The worker/shard ID to resend
-     * @return true if successful, false otherwise
-     */
-    public static boolean resendShardToWorker(int workerId) {
-        if (shardManager == null) {
-            System.err.println("ShardManager not initialized.");
-            return false;
+    static class LeaderServiceImpl extends LeaderServiceGrpc.LeaderServiceImplBase {
+        @Override
+        public void getShard(ShardRequest request, StreamObserver<ShardData> responseObserver) {
+            int workerId = request.getWorkerId();
+            System.out.println("Received shard request from worker-" + workerId);
+            
+            ShardData data = shardManager.getShardData(workerId);
+            
+            if (data != null) {
+                System.out.println("Serving shard " + workerId + " to worker-" + workerId);
+                responseObserver.onNext(data);
+                responseObserver.onCompleted();
+            } else {
+                System.err.println("Shard " + workerId + " not found!");
+                responseObserver.onError(io.grpc.Status.NOT_FOUND
+                    .withDescription("Shard " + workerId + " not found")
+                    .asRuntimeException());
+            }
         }
-        return shardManager.sendShardToWorker(workerId);
     }
 }

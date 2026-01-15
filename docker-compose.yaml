@@ -3,29 +3,34 @@ services:
   # This service uses the "graph-worker" image you just built
   worker-0:
     image: graph-worker:v1
-    container_name: worker-0  # The Leader will use this name to find it
+    container_name: worker-0
+    hostname: worker-0
+    depends_on:
+      - leader
     networks:
       - graph-net
 
   worker-1:
     image: graph-worker:v1
-    container_name: worker-1  # The Leader will use this name to find it
+    container_name: worker-1
+    hostname: worker-1
+    depends_on:
+      - leader
     networks:
       - graph-net
 
   worker-2:
     image: graph-worker:v1
-    container_name: worker-2  # The Leader will use this name to find it
+    container_name: worker-2
+    hostname: worker-2
+    depends_on:
+      - leader
     networks:
       - graph-net
 
   leader:
     image: graph-leader:v1
     container_name: leader
-    depends_on:
-      - worker-0           # Tells Docker to start the worker first
-      - worker-1
-      - worker-2
     environment:
       - WORKER_PORT=9090
       - NUM_WORKERS=3

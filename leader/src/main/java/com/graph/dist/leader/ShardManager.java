@@ -174,6 +174,18 @@ public class ShardManager {
     }
 
     /**
+     * Retrieves the ShardData proto message for a specific shard.
+     * This is used by the LeaderService to respond to worker requests.
+     */
+    public com.graph.dist.proto.ShardData getShardData(int shardId) {
+        Shard shard = shardAssignments.get(shardId);
+        if (shard == null) {
+            return null;
+        }
+        return buildShardData(shardId, shard);
+    }
+
+    /**
      * Builds the protobuf ShardData message for a shard.
      */
     private com.graph.dist.proto.ShardData buildShardData(int shardId, Shard shard) {
