@@ -151,12 +151,24 @@ public class ShardManager {
             return false;
         }
 
-        String host = "worker-" + shardId;
-        System.out.println("Sending shard " + shardId + " to " + host + 
-                           " with " + shard.getNodeCount() + " nodes.");
+        // Respect Kubernetes DNS when running in-cluster. If NAMESPACE is set,
+        // build the StatefulSet pod FQDN: <pod-name>.<service-name>.<namespace>.svc.cluster.local
+        String workerServiceName = System.getenv().getOrDefault("WORKER_SERVICE_NAME", "worker");
+        String namespace = System.getenv().getOrDefault("NAMESPACE", "");
+        int workerPort = Integer.parseInt(System.getenv().getOrDefault("WORKER_PORT", "9090"));
+
+        String host;
+        if (namespace.isEmpty()) {
+            // Docker Compose / local testing: short hostname
+            host = "worker-" + shardId;
+        } else {
+            host = "worker-" + shardId + "." + workerServiceName + "." + namespace + ".svc.cluster.local";
+        }
+
+        System.out.println("Sending shard " + shardId + " to " + host + " with " + shard.getNodeCount() + " nodes.");
 
         try {
-            WorkerClient client = new WorkerClient(host, 9090);
+            WorkerClient client = new WorkerClient(host, workerPort);
             boolean success = client.loadShard(buildShardData(shardId, shard));
             client.shutdown();
             return success;

@@ -1,0 +1,32 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: leader
+  namespace: graph-dist
+  labels:
+    app: graph-leader
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: graph-leader
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: leader
+          image: graph-leader:v1
+          imagePullPolicy: Never  # Use local images (minikube)
+          env:
+            - name: NAMESPACE
+              value: "graph-dist"
+          envFrom:
+            - configMapRef:
+                name: graph-config
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "200m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
