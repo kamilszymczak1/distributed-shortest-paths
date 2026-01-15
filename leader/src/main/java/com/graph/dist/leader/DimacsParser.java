@@ -6,8 +6,21 @@ import java.util.*;
 import java.util.zip.GZIPInputStream;
 
 public class DimacsParser {
+    public static class Edge {
+        public int from;
+        public int to;
+        public int weight;
+
+        public Edge(int from, int to, int weight) {
+            this.from = from;
+            this.to = to;
+            this.weight = weight;
+        }
+    }
+
     public static class GraphData {
         public Map<Integer, Point> coords = new HashMap<>();
+        public List<Edge> edges = new ArrayList<>();
     }
 
     public static GraphData parse(String coPath, String grPath) throws IOException {
@@ -46,9 +59,10 @@ public class DimacsParser {
             while ((line = br.readLine()) != null) {
                 if (line.startsWith("a ")) {
                     String[] p = line.split("\\s+");
-                    int u = Integer.parseInt(p[1]);
-                    int v = Integer.parseInt(p[2]);
-                    double w = Double.parseDouble(p[3]);
+                    int from = Integer.parseInt(p[1]);
+                    int to = Integer.parseInt(p[2]);
+                    int weight = Integer.parseInt(p[3]);
+                    data.edges.add(new Edge(from, to, weight));
                 }
             }
         }

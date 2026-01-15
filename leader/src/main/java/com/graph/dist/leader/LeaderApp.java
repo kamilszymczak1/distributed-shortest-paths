@@ -6,9 +6,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import com.graph.dist.leader.DimacsParser;
-import com.graph.dist.leader.WorkerClient;
-import com.graph.dist.utils.Point;
+import com.graph.dist.proto.ShardData;
+import com.graph.dist.proto.Node;
+import com.graph.dist.proto.Edge;
 
 public class LeaderApp {
 
@@ -35,30 +35,66 @@ public class LeaderApp {
         distributeShards(graphData, numWorkers);
     }
 
-    public static void distributeShards(DimacsParser.GraphData data, int numWorkers) {
-        System.out.println("Distributing shards to " + numWorkers + " workers...");
+    public static Map<Integer, Integer> splitNodesIntoShards(DimacsParser.GraphData data, int numWorkers) {
+        Map<Integer, Integer> nodeToShard = new HashMap<>();
 
         // 1. Sort nodes by X coordinate
         List<Integer> sortedIds = new ArrayList<>(data.coords.keySet());
         sortedIds.sort(Comparator.comparingDouble(id -> data.coords.get(id).x));
 
         int shardSize = (int) Math.ceil((double) sortedIds.size() / numWorkers);
-        Map<Integer, Integer> nodeToShard = new HashMap<>();
 
-        // 2. Prepare Builders
-        List<com.graph.dist.proto.ShardData.Builder> builders = new ArrayList<>();
+        // 2. Assign nodes to shards
         for (int i = 0; i < numWorkers; i++) {
-            builders.add(com.graph.dist.proto.ShardData.newBuilder().setShardId(i));
-
             int start = i * shardSize;
             int end = Math.min(start + shardSize, sortedIds.size());
             for (int j = start; j < end; j++) {
                 int id = sortedIds.get(j);
-                Point c = data.coords.get(id);
-                builders.get(i).addNodes(com.graph.dist.proto.Node.newBuilder().setId(id).setX(c.x).setY(c.y));
                 nodeToShard.put(id, i);
             }
         }
+
+        return nodeToShard;
+    }
+
+    public static void distributeShards(DimacsParser.GraphData data, int numWorkers) {
+        System.out.println("Distributing shards to " + numWorkers + " workers...");
+
+        Map<Integer, Integer> nodeToShard = splitNodesIntoShards(data, numWorkers);
+
+        // Prepare shard data builders
+        List<ShardData.Builder> builders = java.util.stream.IntStream.range(0, numWorkers)
+                .mapToObj(i -> {
+                    ShardData.Builder builder = ShardData.newBuilder();
+                    builder.setShardId(i);
+                    return builder;
+                })
+                .collect(java.util.stream.Collectors.toList());
+
+        // Add nodes with coordinates to respective shards
+        data.coords.forEach((nodeId, pt) -> {
+            int shardId = nodeToShard.get(nodeId);
+            builders.get(shardId).addNodes(
+                    Node.newBuilder()
+                            .setId(nodeId)
+                            .setX(pt.x)
+                            .setY(pt.y)
+                            .build());
+        });
+
+        // Add edges to respective shards
+        data.edges.forEach((edge) -> {
+            int fromShard = nodeToShard.get(edge.from);
+            int toShard = nodeToShard.get(edge.to);
+
+            builders.get(fromShard).addEdges(
+                    Edge.newBuilder()
+                            .setFrom(edge.from)
+                            .setTo(edge.to)
+                            .setToShard(toShard)
+                            .setWeight(edge.weight)
+                            .build());
+        });
 
         // 4. Send to Workers
         for (int i = 0; i < numWorkers; i++) {
@@ -67,6 +103,7 @@ public class LeaderApp {
                     + builders.get(i).getNodesCount() + " nodes.");
             WorkerClient client = new WorkerClient(host, 9090);
             client.loadShard(builders.get(i).build());
+            client.shutdown();
         }
     }
 }
