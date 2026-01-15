@@ -112,7 +112,7 @@ kubectl logs -n graph-dist worker-0
 
 ```bash
 ./k8s_cleanup.sh   # Remove Kubernetes resources
-minikube stop      # Stop minikube
+./minikube_stop.sh # Stop minikube
 ```
 
 ## Running the app on Google Cloud (GKE)
@@ -175,4 +175,62 @@ docker push gcr.io/YOUR_PROJECT_ID/graph-leader:v1
 ```bash
 # Delete the cluster (to avoid charges)
 gcloud container clusters delete graph-cluster --zone us-central1-a
+```
+
+## Querying for Shortest Paths
+
+The leader exposes a REST API for finding the shortest path between two nodes in the graph.
+
+### API Endpoint
+
+`GET /shortest-path`
+
+### Query Parameters
+
+- `from`: The ID of the starting node.
+- `to`: The ID of the ending node.
+
+### Example Usage
+
+#### Using `curl`
+
+You can use `curl` to send a request to the API.
+
+If you are running the application with Docker Compose, the API will be available on `http://localhost:8080`.
+
+```bash
+curl "http://localhost:8080/shortest-path?from=1&to=100"
+```
+
+If you are running the application on Kubernetes with minikube, the `k8s_deploy.sh` script automatically starts port-forwarding for you.
+
+After the script finishes, the `leader`'s API will be available at `http://localhost:8080`.
+
+You can then use `curl` or your web browser to access the API.
+
+```bash
+curl "http://localhost:8080/shortest-path?from=1&to=100"
+```
+
+The port-forwarding runs in the background. The script will print the process ID (PID) of the background job and a command to stop it.
+
+#### Using a Web Browser
+
+You can also open the URL in your web browser:
+```
+http://localhost:8080/shortest-path?from=1&to=100
+```
+
+
+
+### Example Response
+
+The API will return a JSON object with the distance and the path.
+**Note:** The current implementation is a placeholder and will return a dummy response.
+
+```json
+{
+  "distance": 0.0,
+  "path": []
+}
 ```

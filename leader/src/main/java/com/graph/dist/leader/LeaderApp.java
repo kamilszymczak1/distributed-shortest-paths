@@ -13,10 +13,12 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import io.javalin.Javalin;
 
 public class LeaderApp {
 
     private static ShardManager shardManager;
+    private static ApiHandler apiHandler;
 
     public static int getNumWorkers() {
         String numWorkers = System.getenv().getOrDefault("NUM_WORKERS", "1");
@@ -25,6 +27,11 @@ public class LeaderApp {
 
     public static void main(String[] args) throws Exception {
         System.out.println("Leader starting...");
+
+        apiHandler = new ApiHandler();
+
+        Javalin app = Javalin.create().start(8080);
+        app.get("/shortest-path", apiHandler::handleShortestPath);
 
         Map<Integer, Point> coords = null;
         String coPath = "/data/graph.co.gz";
