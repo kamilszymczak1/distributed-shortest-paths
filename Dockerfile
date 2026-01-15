@@ -1,0 +1,39 @@
+# --- STAGE 1: The Build Environment ---
+# We use the full Maven image to compile the code
+FROM maven:3.9-eclipse-temurin-17 AS builder
+WORKDIR /app
+
+# Copy only the POM files first (better for Docker caching)
+COPY pom.xml .
+COPY common/pom.xml common/
+COPY leader/pom.xml leader/
+COPY worker/pom.xml worker/
+
+# Download dependencies (this layer is cached unless poms change)
+RUN mvn dependency:go-offline -B
+
+# Copy the source code
+COPY common/src common/src
+COPY leader/src leader/src
+COPY worker/src worker/src
+
+# Build the project and package the Fat JARs
+RUN mvn clean package -DskipTests
+
+# --- STAGE 2: The Runtime Environment ---
+# We use a slim JRE (Java Runtime Environment) for the final image
+FROM eclipse-temurin:17-jre-jammy
+WORKDIR /app
+
+# This argument tells Docker which JAR to grab (leader or worker)
+ARG MODULE_NAME
+
+# Copy the specific JAR from the builder stage
+# We rename it to 'app.jar' for simplicity in the ENTRYPOINT
+COPY --from=builder /app/${MODULE_NAME}/target/${MODULE_NAME}-1.0-SNAPSHOT.jar app.jar
+
+# Expose the gRPC port
+EXPOSE 9090
+
+# Run the application
+ENTRYPOINT ["java", "-jar", "app.jar"]
