@@ -24,6 +24,10 @@ public class WorkerClient {
         return response.getSuccess();
     }
 
+    public ShortestPathResponse solveShortestPath(ShortestPathRequest request) {
+        return stub.solveShortestPath(request);
+    }
+
     public void shutdown() {
         channel.shutdown();
     }

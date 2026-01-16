@@ -1,7 +1,12 @@
 package com.graph.dist.worker;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.PriorityQueue;
+
+import org.jgrapht.alg.util.Pair;
 
 import com.graph.dist.proto.*;
 import com.graph.dist.utils.Point;
@@ -28,7 +33,14 @@ public class WorkerApp {
     static int my_shard_id;
     static HashMap<Integer, Point> nodeCoords = new HashMap<>();
     static HashMap<Integer, ArrayList<OutBoundEdge>> outBoundEdges = new HashMap<>();
+    static HashMap<Integer, Integer> toBoundaryId = new HashMap<>();
+    static HashMap<Integer, Integer> fromBoundaryId = new HashMap<>();
+    static HashMap<Integer, ArrayList<OutBoundEdge>> outerEdges = new HashMap<>();  // node_id, list(out_of_shard_edge)
+    static HashMap<Integer, HashMap<Integer, Integer>> queryDist = new HashMap<>(); // query_id, (node_id, distance)
+    static HashMap<Integer, HashMap<Integer, Pair<Integer, Integer>>> queryFrom = new HashMap<>(); // query_id, (node_id, (from_node, from_shard))
+    static int distBoundary[][];
     static boolean has_graph = false;
+    static final HashMap<Integer, GraphServiceGrpc.GraphServiceBlockingStub> workerStubs = new HashMap<>();
 
     public static void main(String[] args) throws Exception {
         // Determine ID
@@ -45,6 +57,21 @@ public class WorkerApp {
 
         // Fetch shard from Leader
         fetchShardFromLeader(workerId);
+
+        // After fetching our shard, we can connect to our peer workers.
+        // We'll use an environment variable to determine the total number of workers.
+        int numWorkers = Integer.parseInt(System.getenv().getOrDefault("NUM_WORKERS", "1"));
+        for (int i = 0; i < numWorkers; i++) {
+            if (i == my_shard_id) {
+                continue;
+            }
+            String workerHost = "worker-" + i;
+            System.out.println("Connecting to peer worker " + i + " at " + workerHost + ":9090");
+            ManagedChannel channel = ManagedChannelBuilder.forAddress(workerHost, 9090)
+                    .usePlaintext()
+                    .build();
+            workerStubs.put(i, GraphServiceGrpc.newBlockingStub(channel));
+        }
 
         // Start the gRPC server on port 9090
         Server server = ServerBuilder.forPort(9090)
@@ -120,20 +147,25 @@ public class WorkerApp {
             }
         }
 
-        int num_boundary_nodes = 0;
-        int num_boundary_edges = 0;
-        for (int nodeId : nodeCoords.keySet()) {
-            boolean is_boundary = false;
-            for (OutBoundEdge obe : outBoundEdges.get(nodeId)) {
-                if (obe.toShard != my_shard_id) {
-                    num_boundary_edges++;
-                    is_boundary = true;
+            int num_boundary_nodes = 0;
+            int num_boundary_edges = 0;
+            for (int nodeId : nodeCoords.keySet()) {
+                boolean is_boundary = false;
+                for (OutBoundEdge obe : outBoundEdges.get(nodeId)) {
+                    if (obe.toShard != my_shard_id) {
+                        num_boundary_edges++;
+                        is_boundary = true;
+                        outerEdges.computeIfAbsent(nodeId, k -> new ArrayList<>()).add(obe);
+                    }
+                }
+                if (is_boundary) {
+                    toBoundaryId.put(nodeId, num_boundary_nodes);
+                    fromBoundaryId.put(num_boundary_nodes, nodeId);
+                    num_boundary_nodes++;
                 }
             }
-            if (is_boundary) {
-                num_boundary_nodes++;
-            }
-        }
+            distBoundary = new int[num_boundary_nodes][num_boundary_nodes];
+            precomputeBoundaryDistances();
 
         System.out
                 .println("Worker " + request.getShardId() + " loaded " + nodeCoords.size() + " nodes and "
@@ -163,5 +195,176 @@ public class WorkerApp {
             responseObserver.onNext(ShardResponse.newBuilder().setSuccess(true).build());
             responseObserver.onCompleted();
         }
+
+        @Override
+        public void solveShortestPath(ShortestPathRequest request, StreamObserver<ShortestPathResponse> responseObserver) {
+            int startNode = request.getStartNode();
+            int endNode = request.getEndNode();
+            boolean startShard = nodeCoords.containsKey(startNode);
+            boolean endShard = nodeCoords.containsKey(endNode);
+
+            System.out.println("Solving shortest path from " + startNode + " to " + endNode);
+
+            if (!startShard && !endShard) {
+                responseObserver.onError(
+                    new io.grpc.StatusRuntimeException(io.grpc.Status.INVALID_ARGUMENT.withDescription("Neither start nor end node is in this shard"))
+                );
+                return;
+            }
+
+            if (startShard && endShard) {                
+                Pair<HashMap<Integer, Integer>, HashMap<Integer, Pair<Integer, Integer>>> dist_from = dijkstra(startNode);
+                HashMap<Integer, Integer> dist = dist_from.getFirst();
+                HashMap<Integer, Pair<Integer, Integer>> from = dist_from.getSecond();
+                
+                int distance = dist.get(endNode);
+                responseObserver.onNext(ShortestPathResponse.newBuilder().setDistance(distance).build());
+                responseObserver.onCompleted();
+                return;
+            }
+
+            else if (startShard) {                
+                Pair<HashMap<Integer, Integer>, HashMap<Integer, Pair<Integer, Integer>>> dist_from = dijkstra(startNode);
+                HashMap<Integer, Integer> dist = dist_from.getFirst();
+                HashMap<Integer, Pair<Integer, Integer>> from = dist_from.getSecond();
+
+                queryDist.put(request.getQueryId(), dist);
+                queryFrom.put(request.getQueryId(), from);
+
+                for (int i = 0; i < distBoundary.length; i++) {
+                    int nodeId = fromBoundaryId.get(i);
+                    relaxOuterEdges(nodeId, dist.get(nodeId), request.getQueryId());
+                }
+            }
+
+            else { // endShard
+                Pair<HashMap<Integer, Integer>, HashMap<Integer, Pair<Integer, Integer>>> dist_from = dijkstra(endNode);
+                HashMap<Integer, Integer> dist = dist_from.getFirst();
+                HashMap<Integer, Pair<Integer, Integer>> from = dist_from.getSecond();
+                
+                try {
+                    Thread.sleep(10 * 1000);
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+                
+                int minDist = Integer.MAX_VALUE;
+                for (int i = 0; i < distBoundary.length; i++) {
+                    int nodeId = fromBoundaryId.get(i);
+                    int distFromStart = queryDist.get(request.getQueryId()).get(nodeId);
+                    int distToEnd = distFromStart + dist.get(nodeId);
+                    minDist = Integer.min(minDist, distToEnd);
+                }
+
+                responseObserver.onNext(ShortestPathResponse.newBuilder().setDistance(minDist).build());
+                responseObserver.onCompleted();
+                return;
+            }
+        }
+
+        @Override
+        public void updateShortestPath(UpdateShortestPathRequest request, StreamObserver<UpdateShortestPathResponse> responseObserver) {
+            System.out.println("Received UpdateShortestPath request: from " + request.getFromNode() +
+                    " to " + request.getToNode() + " with new distance " + request.getDistance());
+
+            handleUpdate(request);
+            // responseObserver.onNext(UpdateShortestPathResponse.newBuilder().setSuccess(true).build());
+            // responseObserver.onCompleted();
+        }
+    }
+
+    static void handleUpdate(UpdateShortestPathRequest request) {
+        int queryId = request.getQueryId();
+        int from = request.getFromNode();
+        int fromShard = request.getFromShard();
+        int to = request.getToNode();
+        int dist = request.getDistance();
+
+        HashMap<Integer, Integer> qDist = queryDist.computeIfAbsent(queryId, k -> new HashMap<>());
+        HashMap<Integer, Pair<Integer, Integer>> qFrom  = queryFrom.computeIfAbsent(queryId, k -> new HashMap<>());
+
+        if (qDist.getOrDefault(to, Integer.MAX_VALUE) > dist) {
+            qDist.put(to, dist);
+            qFrom.put(to, new Pair<>(from, fromShard));
+            
+            int startBoundaryId = toBoundaryId.get(to);
+            relaxOuterEdges(to, dist, queryId);
+            for (int i = 0; i < distBoundary.length; i++) {
+                int nodeId = toBoundaryId.get(i);
+
+                if (qDist.getOrDefault(nodeId, Integer.MAX_VALUE) > dist + distBoundary[startBoundaryId][i]) {
+                    qDist.put(nodeId, dist + distBoundary[startBoundaryId][i]);
+                    qFrom.put(nodeId, new Pair<>(startBoundaryId, my_shard_id));
+                    relaxOuterEdges(nodeId, qDist.get(nodeId), queryId);
+                }
+            }
+        }
+    }
+
+    static void relaxOuterEdges(int nodeId, int myDist, int queryId) {
+        for (OutBoundEdge obe : outerEdges.get(nodeId)) {
+            GraphServiceGrpc.GraphServiceBlockingStub stub = workerStubs.get(obe.toShard);
+            System.out.println("Query " + queryId + ": Propagating update from worker " + my_shard_id + ":" + nodeId + " to " + obe.toShard + ":" + obe.to);
+            try {
+                UpdateShortestPathRequest newRequest = UpdateShortestPathRequest.newBuilder()
+                    .setQueryId(queryId)
+                    .setFromNode(nodeId)
+                    .setFromShard(my_shard_id)
+                    .setToNode(obe.to)
+                    .setDistance(myDist + obe.weight)
+                    .build();
+
+                // This is the call that sends the message to the other worker
+                stub.updateShortestPath(newRequest);
+
+            } catch (Exception e) {
+                System.err.println("Failed to send update to worker " + obe.toShard + ": " + e.getMessage());
+            }
+        }
+    }
+    
+    static void precomputeBoundaryDistances() {
+        for (int i = 0; i < distBoundary.length; i++) {
+            Pair<HashMap<Integer, Integer>, HashMap<Integer, Pair<Integer, Integer>>> dist_from = dijkstra(fromBoundaryId.get(i));
+            HashMap<Integer, Integer> dist = dist_from.getFirst();
+
+            for (int j = 0; j < distBoundary.length; j++) {
+                distBoundary[i][j] = dist.get(fromBoundaryId.get(j));
+            }
+        }
+    }
+
+    static Pair<HashMap<Integer, Integer>, HashMap<Integer, Pair<Integer, Integer>>> dijkstra(int src) {
+        HashMap<Integer, Integer> dist = new HashMap<>(nodeCoords.size());
+        HashMap<Integer, Pair<Integer, Integer>> from = new HashMap<>(nodeCoords.size());
+        HashMap<Integer, Boolean> visited = new HashMap<>(nodeCoords.size());
+        for (Integer id : nodeCoords.keySet()) {
+            dist.put(id, Integer.MAX_VALUE);
+            from.put(id, new Pair<>(-1, -1));
+            visited.put(id, false);
+        }
+        dist.put(src, 0);
+
+        PriorityQueue<Pair<Integer,Integer>> pq =
+                new PriorityQueue<>(distBoundary.length, Comparator.comparing(Pair::getFirst));
+
+        pq.add(new Pair<>(0, src));
+        while (!pq.isEmpty()) {
+            Pair<Integer,Integer> p = pq.poll();
+            int curDist = p.getFirst();
+            int u = p.getSecond();
+            if (visited.get(u)) continue;
+            visited.put(u, true);
+            for (OutBoundEdge v : outBoundEdges.get(u)) {
+                if (visited.getOrDefault(v.to, true)) continue;
+                int newDist = curDist + v.weight;
+                if (newDist < dist.get(v.to)) {
+                    dist.put(v.to, newDist);
+                    from.put(v.to, new Pair<>(u, my_shard_id));
+                    pq.add(new Pair<>(newDist, v.to));
+                }
+            }
+        }
+        return new Pair<>(dist, from);
     }
 }
