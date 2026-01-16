@@ -3,6 +3,8 @@ package com.graph.dist.leader;
 import com.graph.dist.proto.GraphServiceGrpc;
 import com.graph.dist.proto.ShardData;
 import com.graph.dist.proto.ShardResponse;
+import com.graph.dist.proto.ShortestPathResponse;
+import com.graph.dist.proto.ShortestPathRequest;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 
@@ -29,7 +31,7 @@ public class WorkerClient {
     }
 
     public ShortestPathResponse solveShortestPath(ShortestPathRequest request) {
-        return stub.solveShortestPath(request);
+        return blockingStub.solveShortestPath(request);
     }
 
     public void shutdown() {
