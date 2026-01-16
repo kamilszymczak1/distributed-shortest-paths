@@ -1,27 +1,31 @@
 package com.graph.dist.leader;
 
-import com.graph.dist.proto.*;
+import com.graph.dist.proto.GraphServiceGrpc;
+import com.graph.dist.proto.ShardData;
+import com.graph.dist.proto.ShardResponse;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 
 public class WorkerClient {
-    private final GraphServiceGrpc.GraphServiceBlockingStub stub;
+
     private final ManagedChannel channel;
+    private final GraphServiceGrpc.GraphServiceBlockingStub blockingStub;
 
     public WorkerClient(String host, int port) {
-        // Create a connection (channel) to the worker
         this.channel = ManagedChannelBuilder.forAddress(host, port)
-                .usePlaintext() // No SSL for this toy example
-                .maxInboundMessageSize(50 * 1024 * 1024) // 50 MB
+                .usePlaintext()
                 .build();
-
-        // Create the "stub" (the actual remote caller)
-        this.stub = GraphServiceGrpc.newBlockingStub(channel);
+        this.blockingStub = GraphServiceGrpc.newBlockingStub(channel);
     }
 
-    public boolean loadShard(ShardData shard) {
-        ShardResponse response = stub.loadShard(shard);
-        return response.getSuccess();
+    public boolean loadShard(ShardData shardData) {
+        try {
+            ShardResponse response = blockingStub.loadShard(shardData);
+            return response.getSuccess();
+        } catch (Exception e) {
+            System.err.println("Failed to send shard to worker: " + e.getMessage());
+            return false;
+        }
     }
 
     public ShortestPathResponse solveShortestPath(ShortestPathRequest request) {

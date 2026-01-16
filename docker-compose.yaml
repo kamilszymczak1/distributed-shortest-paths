@@ -36,6 +36,8 @@ services:
       - NUM_WORKERS=3
     networks:
       - graph-net
+    ports:
+      - "8080:8080"
     volumes:
       - ./data:/data
 

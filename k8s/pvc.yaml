@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: graph-data-pvc
+  namespace: graph-dist
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 2Gi
+  storageClassName: standard
+---
+# For local development with minikube, we use a hostPath PV
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: graph-data-pv
+  labels:
+    type: local
+spec:
+  storageClassName: standard
+  capacity:
+    storage: 2Gi
+  accessModes:
+    - ReadOnlyMany
+  hostPath:
+    path: /data/graph  # This will be mounted from host in minikube
+    type: DirectoryOrCreate

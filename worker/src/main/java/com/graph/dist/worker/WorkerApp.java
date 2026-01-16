@@ -85,9 +85,17 @@ public class WorkerApp {
     }
 
     private static void fetchShardFromLeader(int workerId) {
-        String leaderHost = System.getenv().getOrDefault("LEADER_HOST", "leader");
-        int leaderPort = 9090;
-        
+        String leaderServiceName = System.getenv().getOrDefault("LEADER_SERVICE_NAME", "leader");
+        String namespace = System.getenv().getOrDefault("NAMESPACE", "");
+        int leaderPort = Integer.parseInt(System.getenv().getOrDefault("LEADER_PORT", "9090"));
+
+        String leaderHost;
+        if (namespace.isEmpty()) {
+            leaderHost = leaderServiceName; // local / docker-compose
+        } else {
+            leaderHost = leaderServiceName + "." + namespace + ".svc.cluster.local"; // k8s FQDN
+        }
+
         System.out.println("Connecting to leader at " + leaderHost + ":" + leaderPort);
         ManagedChannel channel = ManagedChannelBuilder.forAddress(leaderHost, leaderPort)
                 .usePlaintext()
