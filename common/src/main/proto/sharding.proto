@@ -23,10 +23,6 @@ message ShardData {
   repeated Edge edges = 3;
 }
 
-message ShardResponse {
-  bool success = 1;
-  string message = 2;
-}
 message ShardRequest {
   int32 worker_id = 1;
 }
@@ -55,7 +51,6 @@ message UpdateShortestPathResponse {
 }
 
 service GraphService {
-  rpc LoadShard(ShardData) returns (ShardResponse);
   rpc SolveShortestPath(ShortestPathRequest) returns (ShortestPathResponse);
   rpc UpdateShortestPath(UpdateShortestPathRequest) returns (UpdateShortestPathResponse);
 }

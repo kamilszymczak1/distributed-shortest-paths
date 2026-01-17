@@ -1,8 +1,6 @@
 package com.graph.dist.leader;
 
 import com.graph.dist.proto.GraphServiceGrpc;
-import com.graph.dist.proto.ShardData;
-import com.graph.dist.proto.ShardResponse;
 import com.graph.dist.proto.ShortestPathResponse;
 import com.graph.dist.proto.ShortestPathRequest;
 import io.grpc.ManagedChannel;
@@ -18,16 +16,6 @@ public class WorkerClient {
                 .usePlaintext()
                 .build();
         this.blockingStub = GraphServiceGrpc.newBlockingStub(channel);
-    }
-
-    public boolean loadShard(ShardData shardData) {
-        try {
-            ShardResponse response = blockingStub.loadShard(shardData);
-            return response.getSuccess();
-        } catch (Exception e) {
-            System.err.println("Failed to send shard to worker: " + e.getMessage());
-            return false;
-        }
     }
 
     public ShortestPathResponse solveShortestPath(ShortestPathRequest request) {

@@ -19,7 +19,6 @@ public class ApiHandler {
 
     private final ShardManager shardManager;
     private final ReentrantLock lock = new ReentrantLock();
-    private final ObjectMapper objectMapper = new ObjectMapper();
 
     public ApiHandler(ShardManager shardManager) {
         this.shardManager = shardManager;
@@ -74,12 +73,11 @@ public class ApiHandler {
             ctx.status(404).json(Collections.singletonMap("error", e.getMessage()));
         } catch (StatusRuntimeException e) {
             ctx.status(500).json(Collections.singletonMap("error", "gRPC error: " + e.getStatus().toString()));
-        }
-        finally {
+        } finally {
             lock.unlock();
         }
     }
-    
+
     private String getWorkerHost(int shardId) {
         String workerServiceName = System.getenv().getOrDefault("WORKER_SERVICE_NAME", "worker");
         String namespace = System.getenv().getOrDefault("NAMESPACE", "");
@@ -112,11 +110,12 @@ public class ApiHandler {
                 .build();
 
         if (fromShard == toShard) {
-             String host = getWorkerHost(fromShard);
-             System.out.println("Forwarding shortest path request for " + from + " -> " + to + " to worker " + fromShard + " at " + host);
-             ManagedChannel channel = ManagedChannelBuilder.forAddress(host, workerPort)
-                .usePlaintext()
-                .build();
+            String host = getWorkerHost(fromShard);
+            System.out.println("Forwarding shortest path request for " + from + " -> " + to + " to worker " + fromShard
+                    + " at " + host);
+            ManagedChannel channel = ManagedChannelBuilder.forAddress(host, workerPort)
+                    .usePlaintext()
+                    .build();
             try {
                 GraphServiceGrpc.GraphServiceBlockingStub stub = GraphServiceGrpc.newBlockingStub(channel);
                 ShortestPathResponse response = stub.solveShortestPath(request);
@@ -131,10 +130,12 @@ public class ApiHandler {
         } else {
             String startHost = getWorkerHost(fromShard);
             String endHost = getWorkerHost(toShard);
-            
-            System.out.println("Forwarding shortest path request for " + from + " -> " + to + " to worker " + fromShard + " (start) and " + toShard + " (end)");
 
-            ManagedChannel startChannel = ManagedChannelBuilder.forAddress(startHost, workerPort).usePlaintext().build();
+            System.out.println("Forwarding shortest path request for " + from + " -> " + to + " to worker " + fromShard
+                    + " (start) and " + toShard + " (end)");
+
+            ManagedChannel startChannel = ManagedChannelBuilder.forAddress(startHost, workerPort).usePlaintext()
+                    .build();
             ManagedChannel endChannel = ManagedChannelBuilder.forAddress(endHost, workerPort).usePlaintext().build();
 
             try {

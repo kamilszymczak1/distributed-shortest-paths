@@ -10,14 +10,14 @@ import java.util.zip.GZIPInputStream;
  * Keeps track of shards so they can be resent to workers if pods restart.
  */
 public class ShardManager {
-    
+
     private final Map<Integer, Point> coords;
     private final String edgeFilePath;
     private final int numWorkers;
-    
+
     // Stores the final shards indexed by shard ID (worker index)
     private final Map<Integer, Shard> shardAssignments = new HashMap<>();
-    
+
     // Maps node ID to shard ID for quick lookup
     private Map<Integer, Integer> nodeToShardId;
 
@@ -43,8 +43,7 @@ public class ShardManager {
 
         // Priority queue sorted by node count (descending)
         PriorityQueue<Shard> shardQueue = new PriorityQueue<>(
-            Comparator.comparingInt(Shard::getNodeCount).reversed()
-        );
+                Comparator.comparingInt(Shard::getNodeCount).reversed());
 
         // Start with a single shard containing all nodes
         Shard initialShard = Shard.createInitialShard(coords);
@@ -56,23 +55,23 @@ public class ShardManager {
         while (shardQueue.size() < numWorkers) {
             // Pick the shard with the most nodes
             Shard largestShard = shardQueue.poll();
-            
+
             if (largestShard == null || largestShard.getNodeCount() <= 1) {
-                System.err.println("Warning: Cannot split further. " + 
-                                   "Shard has " + (largestShard != null ? largestShard.getNodeCount() : 0) + " nodes.");
+                System.err.println("Warning: Cannot split further. " +
+                        "Shard has " + (largestShard != null ? largestShard.getNodeCount() : 0) + " nodes.");
                 if (largestShard != null) {
                     shardQueue.add(largestShard);
                 }
                 break;
             }
 
-            System.out.println("Splitting shard with " + largestShard.getNodeCount() + 
-                               " nodes (width=" + largestShard.getWidth() + 
-                               ", height=" + largestShard.getHeight() + ")");
+            System.out.println("Splitting shard with " + largestShard.getNodeCount() +
+                    " nodes (width=" + largestShard.getWidth() +
+                    ", height=" + largestShard.getHeight() + ")");
 
             // Split the shard
             Shard[] newShards = largestShard.split(coords);
-            
+
             System.out.println("  -> Created: " + newShards[0] + " and " + newShards[1]);
 
             // Add the new shards to the queue
@@ -86,15 +85,15 @@ public class ShardManager {
         // Assign shard IDs and store them
         int shardId = 0;
         nodeToShardId = new HashMap<>();
-        
+
         for (Shard shard : shardQueue) {
             shardAssignments.put(shardId, shard);
-            
+
             // Build node to shard mapping
             for (int nodeId : shard.nodeIds) {
                 nodeToShardId.put(nodeId, shardId);
             }
-            
+
             System.out.println("Shard " + shardId + ": " + shard);
             shardId++;
         }
@@ -138,58 +137,6 @@ public class ShardManager {
     }
 
     /**
-     * Sends a specific shard to its assigned worker.
-     * Used for initial distribution or when a worker pod restarts.
-     * 
-     * @param shardId The ID of the shard to send
-     * @return true if successful, false otherwise
-     */
-    public boolean sendShardToWorker(int shardId) {
-        Shard shard = shardAssignments.get(shardId);
-        if (shard == null) {
-            System.err.println("Shard " + shardId + " not found.");
-            return false;
-        }
-
-        // Respect Kubernetes DNS when running in-cluster. If NAMESPACE is set,
-        // build the StatefulSet pod FQDN: <pod-name>.<service-name>.<namespace>.svc.cluster.local
-        String workerServiceName = System.getenv().getOrDefault("WORKER_SERVICE_NAME", "worker");
-        String namespace = System.getenv().getOrDefault("NAMESPACE", "");
-        int workerPort = Integer.parseInt(System.getenv().getOrDefault("WORKER_PORT", "9090"));
-
-        String host;
-        if (namespace.isEmpty()) {
-            // Docker Compose / local testing: short hostname
-            host = "worker-" + shardId;
-        } else {
-            host = "worker-" + shardId + "." + workerServiceName + "." + namespace + ".svc.cluster.local";
-        }
-
-        System.out.println("Sending shard " + shardId + " to " + host + " with " + shard.getNodeCount() + " nodes.");
-
-        try {
-            WorkerClient client = new WorkerClient(host, workerPort);
-            boolean success = client.loadShard(buildShardData(shardId, shard));
-            client.shutdown();
-            return success;
-        } catch (Exception e) {
-            System.err.println("Failed to send shard " + shardId + " to " + host + ": " + e.getMessage());
-            return false;
-        }
-    }
-
-    /**
-     * Sends all shards to their respective workers.
-     */
-    public void distributeAllShards() {
-        System.out.println("Distributing " + shardAssignments.size() + " shards to workers...");
-        
-        for (int shardId : shardAssignments.keySet()) {
-            sendShardToWorker(shardId);
-        }
-    }
-
-    /**
      * Retrieves the ShardData proto message for a specific shard.
      * This is used by the LeaderService to respond to worker requests.
      */
@@ -212,12 +159,11 @@ public class ShardManager {
         for (int nodeId : shard.nodeIds) {
             Point pt = coords.get(nodeId);
             builder.addNodes(
-                com.graph.dist.proto.Node.newBuilder()
-                    .setId(nodeId)
-                    .setX(pt.x)
-                    .setY(pt.y)
-                    .build()
-            );
+                    com.graph.dist.proto.Node.newBuilder()
+                            .setId(nodeId)
+                            .setX(pt.x)
+                            .setY(pt.y)
+                            .build());
         }
 
         // Add edges that originate from nodes in this shard
@@ -229,20 +175,19 @@ public class ShardManager {
                 if (line.startsWith("a ")) {
                     String[] p = line.split("\\s+");
                     int from = Integer.parseInt(p[1]);
-                    
+
                     if (nodeSet.contains(from)) {
                         int to = Integer.parseInt(p[2]);
                         int weight = Integer.parseInt(p[3]);
                         int toShard = getShardIdForNode(to);
-                        
+
                         builder.addEdges(
-                            com.graph.dist.proto.Edge.newBuilder()
-                                .setFrom(from)
-                                .setTo(to)
-                                .setToShard(toShard)
-                                .setWeight(weight)
-                                .build()
-                        );
+                                com.graph.dist.proto.Edge.newBuilder()
+                                        .setFrom(from)
+                                        .setTo(to)
+                                        .setToShard(toShard)
+                                        .setWeight(weight)
+                                        .build());
                     }
                 }
             }
