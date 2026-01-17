@@ -28,11 +28,6 @@ public class LeaderApp {
     public static void main(String[] args) throws Exception {
         System.out.println("Leader starting...");
 
-        apiHandler = new ApiHandler();
-
-        Javalin app = Javalin.create().start(8080);
-        app.get("/shortest-path", apiHandler::handleShortestPath);
-
         Map<Integer, Point> coords = null;
         String coPath = "/data/graph.co.gz";
         String grPath = "/data/graph.gr.gz";
@@ -50,6 +45,11 @@ public class LeaderApp {
         // Create shards
         shardManager = new ShardManager(coords, grPath, numWorkers);
         shardManager.createShards();
+
+        apiHandler = new ApiHandler(shardManager);
+
+        Javalin app = Javalin.create().start(8080);
+        app.get("/shortest-path", apiHandler::handleShortestPath);
         
         System.out.println("Leader initialization complete. Starting gRPC server on port 9090...");
         

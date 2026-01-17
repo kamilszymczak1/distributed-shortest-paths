@@ -3,6 +3,8 @@ package com.graph.dist.leader;
 import com.graph.dist.proto.GraphServiceGrpc;
 import com.graph.dist.proto.ShardData;
 import com.graph.dist.proto.ShardResponse;
+import com.graph.dist.proto.ShortestPathResponse;
+import com.graph.dist.proto.ShortestPathRequest;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 
@@ -26,6 +28,10 @@ public class WorkerClient {
             System.err.println("Failed to send shard to worker: " + e.getMessage());
             return false;
         }
+    }
+
+    public ShortestPathResponse solveShortestPath(ShortestPathRequest request) {
+        return blockingStub.solveShortestPath(request);
     }
 
     public void shutdown() {
