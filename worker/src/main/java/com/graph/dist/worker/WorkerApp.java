@@ -17,24 +17,35 @@ import io.grpc.stub.StreamObserver;
 
 public class WorkerApp {
 
-    public static class OutBoundEdge {
-        public int to;
+    public static class InternalEdge {
+        public int toLocalId;
+        public int weight;
+
+        public InternalEdge(int toLocalId, int weight) {
+            this.toLocalId = toLocalId;
+            this.weight = weight;
+        }
+    }
+
+    public static class OutOfShardEdge {
+        public int toGlobalId;
         public int toShard;
         public int weight;
 
-        public OutBoundEdge(int to, int toShard, int weight) {
-            this.to = to;
+        public OutOfShardEdge(int toGlobalId, int toShard, int weight) {
+            this.toGlobalId = toGlobalId;
             this.toShard = toShard;
             this.weight = weight;
         }
     }
 
     static int my_shard_id;
-    static HashMap<Integer, Point> nodeCoords = new HashMap<>();
-    static HashMap<Integer, ArrayList<OutBoundEdge>> outBoundEdges = new HashMap<>();
-    static HashMap<Integer, Integer> toBoundaryId = new HashMap<>();
-    static HashMap<Integer, Integer> fromBoundaryId = new HashMap<>();
-    static HashMap<Integer, ArrayList<OutBoundEdge>> outerEdges = new HashMap<>(); // node_id, list(out_of_shard_edge)
+    static HashMap<Integer, Integer> globalIdToLocalId = new HashMap<>();
+    static ArrayList<ArrayList<InternalEdge>> localOutBoundEdges;
+    static int[] localIdToGlobalId, localIdtoBoundaryId, boundaryIdtoLocalId;
+    static int num_local_nodes;
+
+    static HashMap<Integer, ArrayList<OutOfShardEdge>> outerEdges = new HashMap<>(); // node_id, list(out_of_shard_edge)
     static HashMap<Integer, HashMap<Integer, Integer>> queryDist = new HashMap<>(); // query_id, (node_id, distance)
     static HashMap<Integer, HashMap<Integer, Pair<Integer, Integer>>> queryFrom = new HashMap<>(); // query_id,
                                                                                                    // (node_id,
@@ -136,19 +147,46 @@ public class WorkerApp {
 
         has_graph = true;
         my_shard_id = request.getShardId();
+        num_local_nodes = request.getNodesCount();
 
         int min_x = Integer.MAX_VALUE;
         int max_x = Integer.MIN_VALUE;
         int min_y = Integer.MAX_VALUE;
         int max_y = Integer.MIN_VALUE;
 
+        localOutBoundEdges = new ArrayList<>(num_local_nodes);
+        localIdToGlobalId = new int[num_local_nodes];
+        for (int i = 0; i < num_local_nodes; i++) {
+            localOutBoundEdges.add(new ArrayList<>());
+        }
+
+        int lastId = 0;
         for (com.graph.dist.proto.Node n : request.getNodesList()) {
-            nodeCoords.put(n.getId(), new Point(n.getX(), n.getY()));
-            outBoundEdges.put(n.getId(), new ArrayList<>());
+            globalIdToLocalId.put(n.getId(), lastId);
+            localIdToGlobalId[lastId] = n.getId();
+            lastId++;
+        }
+
+        for (com.graph.dist.proto.Node n : request.getNodesList()) {
             min_x = Math.min(min_x, n.getX());
             max_x = Math.max(max_x, n.getX());
             min_y = Math.min(min_y, n.getY());
             max_y = Math.max(max_y, n.getY());
+        }
+
+        boolean[] isBoundaryNode = new boolean[num_local_nodes];
+        for (int i = 0; i < num_local_nodes; i++) {
+            isBoundaryNode[i] = false;
+        }
+
+        int num_boundary_nodes = 0;
+        int num_boundary_edges = 0;
+
+        boundaryIdtoLocalId = new int[num_local_nodes];
+        localIdtoBoundaryId = new int[num_local_nodes];
+        for (int i = 0; i < num_local_nodes; i++) {
+            localIdtoBoundaryId[i] = -1;
+            boundaryIdtoLocalId[i] = -1;
         }
 
         for (com.graph.dist.proto.Edge e : request.getEdgesList()) {
@@ -157,38 +195,34 @@ public class WorkerApp {
             // But the proto definition says "edges that originate from nodes in this
             // shard".
             // So assert should pass.
-            if (nodeCoords.containsKey(e.getFrom())) {
-                outBoundEdges.get(e.getFrom()).add(new OutBoundEdge(e.getTo(), e.getToShard(), e.getWeight()));
-            }
-        }
-
-        int num_boundary_nodes = 0;
-        int num_boundary_edges = 0;
-        for (int nodeId : nodeCoords.keySet()) {
-            boolean is_boundary = false;
-            for (OutBoundEdge obe : outBoundEdges.get(nodeId)) {
-                if (obe.toShard != my_shard_id) {
-                    num_boundary_edges++;
-                    is_boundary = true;
-                    outerEdges.computeIfAbsent(nodeId, k -> new ArrayList<>()).add(obe);
+            int localIdFrom = globalIdToLocalId.get(e.getFrom());
+            if (globalIdToLocalId.get(e.getTo()) == null) {
+                // This is an out-of-shard edge
+                num_boundary_edges++;
+                if (isBoundaryNode[localIdFrom] == false) {
+                    boundaryIdtoLocalId[num_boundary_nodes] = localIdFrom;
+                    localIdtoBoundaryId[localIdFrom] = num_boundary_nodes;
+                    num_boundary_nodes++;
+                    isBoundaryNode[localIdFrom] = true;
                 }
-            }
-            if (is_boundary) {
-                toBoundaryId.put(nodeId, num_boundary_nodes);
-                fromBoundaryId.put(num_boundary_nodes, nodeId);
-                num_boundary_nodes++;
+                // TODO: Keep the edge info for later processing
+            } else {
+                // This is an internal edge
+                int localIdTo = globalIdToLocalId.get(e.getTo());
+                localOutBoundEdges.get(localIdFrom).add(new InternalEdge(localIdTo, e.getWeight()));
             }
         }
-        distBoundary = new int[num_boundary_nodes][num_boundary_nodes];
-        precomputeBoundaryDistances();
 
         System.out
-                .println("Worker " + request.getShardId() + " loaded " + nodeCoords.size() + " nodes and "
+                .println("Worker " + request.getShardId() + " loaded " + num_local_nodes + " nodes and "
                         + request.getEdgesCount() + " edges.");
         System.out.println("Boundary nodes: " + num_boundary_nodes);
         System.out.println("Boundary edges: " + num_boundary_edges);
         System.out.println("X coordinate range: [" + min_x + ", " + max_x + "]");
         System.out.println("Y coordinate range: [" + min_y + ", " + max_y + "]");
+
+        distBoundary = new int[num_boundary_nodes][num_boundary_nodes];
+        precomputeBoundaryDistances();
     }
 
     static class GraphServiceImpl extends GraphServiceGrpc.GraphServiceImplBase {
@@ -196,12 +230,12 @@ public class WorkerApp {
         @Override
         public void solveShortestPath(ShortestPathRequest request,
                 StreamObserver<ShortestPathResponse> responseObserver) {
-            int startNode = request.getStartNode();
-            int endNode = request.getEndNode();
-            boolean startShard = nodeCoords.containsKey(startNode);
-            boolean endShard = nodeCoords.containsKey(endNode);
+            int startGlobalId = request.getStartNode();
+            int endGlobalId = request.getEndNode();
+            boolean startShard = globalIdToLocalId.containsKey(startGlobalId);
+            boolean endShard = globalIdToLocalId.containsKey(endGlobalId);
 
-            System.out.println("Solving shortest path from " + startNode + " to " + endNode);
+            System.out.println("Solving shortest path from " + startGlobalId + " to " + endGlobalId);
 
             if (!startShard && !endShard) {
                 responseObserver.onError(
@@ -211,52 +245,49 @@ public class WorkerApp {
             }
 
             if (startShard && endShard) {
-                Pair<HashMap<Integer, Integer>, HashMap<Integer, Pair<Integer, Integer>>> dist_from = dijkstra(
-                        startNode);
-                HashMap<Integer, Integer> dist = dist_from.getFirst();
-                HashMap<Integer, Pair<Integer, Integer>> from = dist_from.getSecond();
+                int startLocalId = globalIdToLocalId.get(startGlobalId);
+                int endLocalId = globalIdToLocalId.get(endGlobalId);
+                int[] dist = dijkstra(
+                        startLocalId);
 
-                int distance = dist.get(endNode);
+                int distance = dist[endLocalId];
                 responseObserver.onNext(ShortestPathResponse.newBuilder().setDistance(distance).build());
                 responseObserver.onCompleted();
                 return;
             }
 
             else if (startShard) {
-                Pair<HashMap<Integer, Integer>, HashMap<Integer, Pair<Integer, Integer>>> dist_from = dijkstra(
-                        startNode);
-                HashMap<Integer, Integer> dist = dist_from.getFirst();
-                HashMap<Integer, Pair<Integer, Integer>> from = dist_from.getSecond();
+                int startLocalId = globalIdToLocalId.get(startGlobalId);
+                int[] dist = dijkstra(startLocalId);
 
-                queryDist.put(request.getQueryId(), dist);
-                queryFrom.put(request.getQueryId(), from);
+                // queryDist.put(request.getQueryId(), dist);
 
-                for (int i = 0; i < distBoundary.length; i++) {
-                    int nodeId = fromBoundaryId.get(i);
-                    relaxOuterEdges(nodeId, dist.get(nodeId), request.getQueryId());
-                }
+                // for (int i = 0; i < distBoundary.length; i++) {
+                // int nodeId = fromBoundaryId.get(i);
+                // relaxOuterEdges(nodeId, dist[nodeId], request.getQueryId());
+                // }
             }
 
             else { // endShard
-                Pair<HashMap<Integer, Integer>, HashMap<Integer, Pair<Integer, Integer>>> dist_from = dijkstra(endNode);
-                HashMap<Integer, Integer> dist = dist_from.getFirst();
-                HashMap<Integer, Pair<Integer, Integer>> from = dist_from.getSecond();
+                int endLocalId = globalIdToLocalId.get(endGlobalId);
+                int[] dist = dijkstra(endLocalId);
 
-                try {
-                    Thread.sleep(10 * 1000);
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
-                }
+                // try {
+                // // W
+                // Thread.sleep(10 * 1000);
+                // } catch (InterruptedException e) {
+                // e.printStackTrace();
+                // }
 
-                int minDist = Integer.MAX_VALUE;
-                for (int i = 0; i < distBoundary.length; i++) {
-                    int nodeId = fromBoundaryId.get(i);
-                    int distFromStart = queryDist.get(request.getQueryId()).get(nodeId);
-                    int distToEnd = distFromStart + dist.get(nodeId);
-                    minDist = Integer.min(minDist, distToEnd);
-                }
+                // int minDist = Integer.MAX_VALUE;
+                // for (int i = 0; i < distBoundary.length; i++) {
+                // int nodeId = fromBoundaryId.get(i);
+                // int distFromStart = queryDist.get(request.getQueryId()).get(nodeId);
+                // int distToEnd = distFromStart + dist.get(nodeId);
+                // minDist = Integer.min(minDist, distToEnd);
+                // }
 
-                responseObserver.onNext(ShortestPathResponse.newBuilder().setDistance(minDist).build());
+                responseObserver.onNext(ShortestPathResponse.newBuilder().setDistance(0).build());
                 responseObserver.onCompleted();
                 return;
             }
@@ -268,7 +299,7 @@ public class WorkerApp {
             System.out.println("Received UpdateShortestPath request: from " + request.getFromNode() +
                     " to " + request.getToNode() + " with new distance " + request.getDistance());
 
-            handleUpdate(request);
+            // handleUpdate(request);
             // responseObserver.onNext(UpdateShortestPathResponse.newBuilder().setSuccess(true).build());
             // responseObserver.onCompleted();
         }
@@ -276,100 +307,103 @@ public class WorkerApp {
 
     static void handleUpdate(UpdateShortestPathRequest request) {
         int queryId = request.getQueryId();
-        int from = request.getFromNode();
+        int fromGlobalId = request.getFromNode();
         int fromShard = request.getFromShard();
-        int to = request.getToNode();
+        int toGlobalId = request.getToNode();
         int dist = request.getDistance();
 
         HashMap<Integer, Integer> qDist = queryDist.computeIfAbsent(queryId, k -> new HashMap<>());
         HashMap<Integer, Pair<Integer, Integer>> qFrom = queryFrom.computeIfAbsent(queryId, k -> new HashMap<>());
 
-        if (qDist.getOrDefault(to, Integer.MAX_VALUE) > dist) {
-            qDist.put(to, dist);
-            qFrom.put(to, new Pair<>(from, fromShard));
+        // if (qDist.getOrDefault(to, Integer.MAX_VALUE) > dist) {
+        // qDist.put(to, dist);
+        // qFrom.put(to, new Pair<>(from, fromShard));
 
-            int startBoundaryId = toBoundaryId.get(to);
-            relaxOuterEdges(to, dist, queryId);
-            for (int i = 0; i < distBoundary.length; i++) {
-                int nodeId = toBoundaryId.get(i);
+        // int startBoundaryId = toBoundaryId.get(to);
+        // relaxOuterEdges(to, dist, queryId);
+        // for (int i = 0; i < distBoundary.length; i++) {
+        // int nodeId = toBoundaryId.get(i);
 
-                if (qDist.getOrDefault(nodeId, Integer.MAX_VALUE) > dist + distBoundary[startBoundaryId][i]) {
-                    qDist.put(nodeId, dist + distBoundary[startBoundaryId][i]);
-                    qFrom.put(nodeId, new Pair<>(startBoundaryId, my_shard_id));
-                    relaxOuterEdges(nodeId, qDist.get(nodeId), queryId);
-                }
-            }
-        }
+        // if (qDist.getOrDefault(nodeId, Integer.MAX_VALUE) > dist +
+        // distBoundary[startBoundaryId][i]) {
+        // qDist.put(nodeId, dist + distBoundary[startBoundaryId][i]);
+        // qFrom.put(nodeId, new Pair<>(startBoundaryId, my_shard_id));
+        // relaxOuterEdges(nodeId, qDist.get(nodeId), queryId);
+        // }
+        // }
+        // }
     }
 
     static void relaxOuterEdges(int nodeId, int myDist, int queryId) {
-        for (OutBoundEdge obe : outerEdges.get(nodeId)) {
-            GraphServiceGrpc.GraphServiceBlockingStub stub = workerStubs.get(obe.toShard);
-            System.out.println("Query " + queryId + ": Propagating update from worker " + my_shard_id + ":" + nodeId
-                    + " to " + obe.toShard + ":" + obe.to);
-            try {
-                UpdateShortestPathRequest newRequest = UpdateShortestPathRequest.newBuilder()
-                        .setQueryId(queryId)
-                        .setFromNode(nodeId)
-                        .setFromShard(my_shard_id)
-                        .setToNode(obe.to)
-                        .setDistance(myDist + obe.weight)
-                        .build();
+        // for (OutBoundEdge obe : outerEdges.get(nodeId)) {
+        // GraphServiceGrpc.GraphServiceBlockingStub stub =
+        // workerStubs.get(obe.toShard);
+        // System.out.println("Query " + queryId + ": Propagating update from worker " +
+        // my_shard_id + ":" + nodeId
+        // + " to " + obe.toShard + ":" + obe.to);
+        // try {
+        // UpdateShortestPathRequest newRequest = UpdateShortestPathRequest.newBuilder()
+        // .setQueryId(queryId)
+        // .setFromNode(nodeId)
+        // .setFromShard(my_shard_id)
+        // .setToNode(obe.to)
+        // .setDistance(myDist + obe.weight)
+        // .build();
 
-                // This is the call that sends the message to the other worker
-                stub.updateShortestPath(newRequest);
+        // // This is the call that sends the message to the other worker
+        // stub.updateShortestPath(newRequest);
 
-            } catch (Exception e) {
-                System.err.println("Failed to send update to worker " + obe.toShard + ": " + e.getMessage());
-            }
-        }
+        // } catch (Exception e) {
+        // System.err.println("Failed to send update to worker " + obe.toShard + ": " +
+        // e.getMessage());
+        // }
+        // }
     }
 
     static void precomputeBoundaryDistances() {
         for (int i = 0; i < distBoundary.length; i++) {
-            Pair<HashMap<Integer, Integer>, HashMap<Integer, Pair<Integer, Integer>>> dist_from = dijkstra(
-                    fromBoundaryId.get(i));
-            HashMap<Integer, Integer> dist = dist_from.getFirst();
+            System.out.println("Precomputing distances from boundary node " + boundaryIdtoLocalId[i] + " (" + (i + 1)
+                    + "/" + distBoundary.length + ")");
+
+            int[] dist = dijkstra(
+                    boundaryIdtoLocalId[i]);
 
             for (int j = 0; j < distBoundary.length; j++) {
-                distBoundary[i][j] = dist.get(fromBoundaryId.get(j));
+                distBoundary[i][j] = dist[boundaryIdtoLocalId[j]];
             }
         }
     }
 
-    static Pair<HashMap<Integer, Integer>, HashMap<Integer, Pair<Integer, Integer>>> dijkstra(int src) {
-        HashMap<Integer, Integer> dist = new HashMap<>(nodeCoords.size());
-        HashMap<Integer, Pair<Integer, Integer>> from = new HashMap<>(nodeCoords.size());
-        HashMap<Integer, Boolean> visited = new HashMap<>(nodeCoords.size());
-        for (Integer id : nodeCoords.keySet()) {
-            dist.put(id, Integer.MAX_VALUE);
-            from.put(id, new Pair<>(-1, -1));
-            visited.put(id, false);
+    static int[] dijkstra(int sourceLocalId) {
+        int[] dist = new int[num_local_nodes];
+        boolean[] visited = new boolean[num_local_nodes];
+        for (int i = 0; i < num_local_nodes; i++) {
+            dist[i] = Integer.MAX_VALUE;
+            visited[i] = false;
         }
-        dist.put(src, 0);
+        dist[sourceLocalId] = 0;
 
         PriorityQueue<Pair<Integer, Integer>> pq = new PriorityQueue<>(distBoundary.length,
                 Comparator.comparing(Pair::getFirst));
+        pq.add(new Pair<>(0, sourceLocalId));
 
-        pq.add(new Pair<>(0, src));
         while (!pq.isEmpty()) {
             Pair<Integer, Integer> p = pq.poll();
-            int curDist = p.getFirst();
+            int currentDist = p.getFirst();
             int u = p.getSecond();
-            if (visited.get(u))
+            if (visited[u])
                 continue;
-            visited.put(u, true);
-            for (OutBoundEdge v : outBoundEdges.get(u)) {
-                if (visited.getOrDefault(v.to, true))
+            visited[u] = true;
+            for (InternalEdge v : localOutBoundEdges.get(u)) {
+                if (visited[v.toLocalId])
                     continue;
-                int newDist = curDist + v.weight;
-                if (newDist < dist.get(v.to)) {
-                    dist.put(v.to, newDist);
-                    from.put(v.to, new Pair<>(u, my_shard_id));
-                    pq.add(new Pair<>(newDist, v.to));
+                int newDist = currentDist + v.weight;
+                if (newDist < dist[v.toLocalId]) {
+                    dist[v.toLocalId] = newDist;
+                    pq.add(new Pair<>(newDist, v.toLocalId));
                 }
             }
         }
-        return new Pair<>(dist, from);
+        return dist;
     }
 }
