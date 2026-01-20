@@ -326,7 +326,14 @@ public class WorkerApp {
     }
 
     static void precomputeBoundaryDistances() {
+        Runtime rt = Runtime.getRuntime();
+        long megaByte = 1024 * 1024;
+
+        long usedMBbefore = (rt.totalMemory() - rt.freeMemory()) / megaByte;
+        System.out.println("Memory usage before precomputation: " + usedMBbefore + "MB");
+
         for (int i = 0; i < distBoundary.length; i++) {
+            System.out.println("Starting dijkstra from boundary node " + i + ", real id " + fromBoundaryId.get(i));
             Pair<HashMap<Integer, Integer>, HashMap<Integer, Pair<Integer, Integer>>> dist_from = dijkstra(
                     fromBoundaryId.get(i));
             HashMap<Integer, Integer> dist = dist_from.getFirst();
@@ -334,13 +341,46 @@ public class WorkerApp {
             for (int j = 0; j < distBoundary.length; j++) {
                 distBoundary[i][j] = dist.get(fromBoundaryId.get(j));
             }
+
+            System.out.println("Reached " + dist.size() + " nodes");
+            
+            long usedMBafter = (rt.totalMemory() - rt.freeMemory()) / megaByte;
+            System.out.println("Memory usage after iteration " + i + ": " + usedMBafter + "MB");
+            
+            // Forcing garbage collection for debugging purposes.
+            // This can help confirm if objects from previous iterations are being freed.
+            if ((i > 0) && (i % 2 == 0)) { // Log and GC every 2 iterations
+                System.out.println("Suggesting garbage collection...");
+                System.gc();
+                long usedMBafterGC = (rt.totalMemory() - rt.freeMemory()) / megaByte;
+                System.out.println("Memory usage after GC on iteration " + i + ": " + usedMBafterGC + "MB");
+            }
         }
+        
+        long usedMBfinal = (rt.totalMemory() - rt.freeMemory()) / megaByte;
+        System.out.println("Memory usage after precomputation: " + usedMBfinal + "MB");
+    }
+
+    static class Resources {
+        static HashMap<Integer, Integer> dist = new HashMap<>(nodeCoords.size());
+        static HashMap<Integer, Pair<Integer, Integer>> from = new HashMap<>(nodeCoords.size());
+        static HashMap<Integer, Boolean> visited = new HashMap<>(nodeCoords.size());
+        static PriorityQueue<Pair<Integer, Integer>> pq = new PriorityQueue<>(distBoundary.length,
+            Comparator.comparing(Pair::getFirst));
     }
 
     static Pair<HashMap<Integer, Integer>, HashMap<Integer, Pair<Integer, Integer>>> dijkstra(int src) {
-        HashMap<Integer, Integer> dist = new HashMap<>(nodeCoords.size());
-        HashMap<Integer, Pair<Integer, Integer>> from = new HashMap<>(nodeCoords.size());
-        HashMap<Integer, Boolean> visited = new HashMap<>(nodeCoords.size());
+        
+        var dist = Resources.dist;
+        var from = Resources.from;
+        var visited = Resources.visited;
+        var pq = Resources.pq;
+
+        dist.clear();
+        from.clear();
+        visited.clear();
+        pq.clear();
+
         for (Integer id : nodeCoords.keySet()) {
             dist.put(id, Integer.MAX_VALUE);
             from.put(id, new Pair<>(-1, -1));
@@ -348,8 +388,6 @@ public class WorkerApp {
         }
         dist.put(src, 0);
 
-        PriorityQueue<Pair<Integer, Integer>> pq = new PriorityQueue<>(distBoundary.length,
-                Comparator.comparing(Pair::getFirst));
 
         pq.add(new Pair<>(0, src));
         while (!pq.isEmpty()) {
