@@ -383,13 +383,16 @@ public class WorkerApp {
         }
         dist[sourceLocalId] = 0;
 
-        IndexedPriorityQueue priorityQueue = new IndexedPriorityQueue(num_local_nodes);
+        PriorityQueue<Pair<Integer, Integer>> pq = new PriorityQueue<>(distBoundary.length,
+                Comparator.comparing(Pair::getFirst));
+        pq.add(new Pair<>(0, sourceLocalId));
 
-        priorityQueue.addOrUpdate(sourceLocalId, 0);
-
-        while (!priorityQueue.isEmpty()) {
-            int u = priorityQueue.poll();
-            int currentDist = dist[u];
+        while (!pq.isEmpty()) {
+            Pair<Integer, Integer> p = pq.poll();
+            int currentDist = p.getFirst();
+            int u = p.getSecond();
+            if (visited[u])
+                continue;
             visited[u] = true;
             for (InternalEdge v : localOutBoundEdges.get(u)) {
                 if (visited[v.toLocalId])
@@ -397,7 +400,7 @@ public class WorkerApp {
                 int newDist = currentDist + v.weight;
                 if (newDist < dist[v.toLocalId]) {
                     dist[v.toLocalId] = newDist;
-                    priorityQueue.addOrUpdate(v.toLocalId, newDist);
+                    pq.add(new Pair<>(newDist, v.toLocalId));
                 }
             }
         }
