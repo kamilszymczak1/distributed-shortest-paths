@@ -4,11 +4,20 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.PriorityQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingDeque;
+import java.util.concurrent.TimeUnit;
+import java.util.Arrays;
+import java.util.Collections;
 
 import org.jgrapht.alg.util.Pair;
 
 import com.graph.dist.proto.*;
-import com.graph.dist.utils.Point;
+import com.graph.dist.utils.LeaderClient;
+import com.graph.dist.utils.WorkerClient;
+
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.Server;
@@ -27,6 +36,48 @@ public class WorkerApp {
         }
     }
 
+    public static class ShortestPathSource {
+        public static enum Type {
+            FROM_STARTING_NODE,
+            FROM_BOUNDARY_NODE,
+            FROM_OUT_OF_SHARD_UPDATE,
+        }
+
+        private final Type type;
+        private final int fromGlobalId;
+        private final int fromShard;
+
+        ShortestPathSource(Type type, int fromGlobalId, int fromShard) {
+            this.type = type;
+            this.fromGlobalId = fromGlobalId;
+            this.fromShard = fromShard;
+        }
+
+        public Type getType() {
+            return type;
+        }
+
+        public int getFromGlobalId() {
+            return fromGlobalId;
+        }
+
+        public int getFromShard() {
+            return fromShard;
+        }
+    }
+
+    private static String getWorkerHost(int shardId) {
+        String workerServiceName = System.getenv().getOrDefault("WORKER_SERVICE_NAME", "worker");
+        String namespace = System.getenv().getOrDefault("NAMESPACE", "");
+        String host;
+        if (namespace.isEmpty()) {
+            host = "worker-" + shardId;
+        } else {
+            host = "worker-" + shardId + "." + workerServiceName + "." + namespace + ".svc.cluster.local";
+        }
+        return host;
+    }
+
     public static class OutOfShardEdge {
         public int toGlobalId;
         public int toShard;
@@ -39,21 +90,43 @@ public class WorkerApp {
         }
     }
 
-    static int my_shard_id;
+    public static class OutOfShardUpdate {
+        public int toGlobalId;
+        public int fromGlobalId;
+        public int fromShard;
+        public int distance;
+
+        public OutOfShardUpdate(int toGlobalId, int fromGlobalId, int fromShard, int distance) {
+            this.toGlobalId = toGlobalId;
+            this.fromGlobalId = fromGlobalId;
+            this.fromShard = fromShard;
+            this.distance = distance;
+        }
+    }
+
+    static int myShardId;
     static HashMap<Integer, Integer> globalIdToLocalId = new HashMap<>();
-    static ArrayList<ArrayList<InternalEdge>> localOutBoundEdges;
+    static ArrayList<ArrayList<InternalEdge>> localOutBoundEdges, localOutBoundEdgesRev;
+    static ArrayList<ArrayList<OutOfShardEdge>> localOutOfShardEdges;
     static int[] localIdToGlobalId, localIdtoBoundaryId, boundaryIdtoLocalId;
-    static int num_local_nodes;
+    static int numLocalNodes, numBoundaryNodes;
+
+    static int[] boundaryNodesDistance;
+    static int[] lastReportedDistanceToBoundaryNode; // The last distance we used to send updates to other shards
+                                                     // This helps us avoid sending duplicate updates unnecessarily
+    static ShortestPathSource[] boundaryNodesSource;
 
     static HashMap<Integer, ArrayList<OutOfShardEdge>> outerEdges = new HashMap<>(); // node_id, list(out_of_shard_edge)
-    static HashMap<Integer, HashMap<Integer, Integer>> queryDist = new HashMap<>(); // query_id, (node_id, distance)
-    static HashMap<Integer, HashMap<Integer, Pair<Integer, Integer>>> queryFrom = new HashMap<>(); // query_id,
-                                                                                                   // (node_id,
-                                                                                                   // (from_node,
-                                                                                                   // from_shard))
+
     static int distBoundary[][];
-    static boolean has_graph = false;
-    static final HashMap<Integer, GraphServiceGrpc.GraphServiceBlockingStub> workerStubs = new HashMap<>();
+    static final ArrayList<WorkerClient> workerClients = new ArrayList<>();
+
+    static BlockingQueue<OutOfShardUpdate> updatesFromOtherShards = new LinkedBlockingDeque<>();
+    static BlockingQueue<Integer> nodesToSendToOtherShards = new LinkedBlockingDeque<>();
+
+    static ExecutorService executor;
+
+    static LeaderClient leaderClient;
 
     public static void main(String[] args) throws Exception {
         // Determine ID
@@ -71,19 +144,24 @@ public class WorkerApp {
         // Fetch shard from Leader
         fetchShardFromLeader(workerId);
 
+        String leaderServiceName = System.getenv().getOrDefault("LEADER_SERVICE_NAME", "leader");
+        String namespace = System.getenv().getOrDefault("NAMESPACE", "");
+        int leaderPort = Integer.parseInt(System.getenv().getOrDefault("LEADER_PORT", "9090"));
+
+        leaderClient = new LeaderClient(leaderServiceName + "." + namespace + ".svc.cluster.local", leaderPort);
+
         // After fetching our shard, we can connect to our peer workers.
         // We'll use an environment variable to determine the total number of workers.
         int numWorkers = Integer.parseInt(System.getenv().getOrDefault("NUM_WORKERS", "1"));
         for (int i = 0; i < numWorkers; i++) {
-            if (i == my_shard_id) {
-                continue;
+            String workerHost;
+            if (i == myShardId) {
+                workerHost = "localhost";
+            } else {
+                workerHost = getWorkerHost(i);
             }
-            String workerHost = "worker-" + i;
             System.out.println("Connecting to peer worker " + i + " at " + workerHost + ":9090");
-            ManagedChannel channel = ManagedChannelBuilder.forAddress(workerHost, 9090)
-                    .usePlaintext()
-                    .build();
-            workerStubs.put(i, GraphServiceGrpc.newBlockingStub(channel));
+            workerClients.add(new WorkerClient(workerHost, 9090));
         }
 
         // Start the gRPC server on port 9090
@@ -140,24 +218,22 @@ public class WorkerApp {
     }
 
     private static void loadShardData(ShardData request) {
-        if (has_graph) {
-            System.out.println("Graph already loaded, skipping.");
-            return;
-        }
-
-        has_graph = true;
-        my_shard_id = request.getShardId();
-        num_local_nodes = request.getNodesCount();
+        myShardId = request.getShardId();
+        numLocalNodes = request.getNodesCount();
 
         int min_x = Integer.MAX_VALUE;
         int max_x = Integer.MIN_VALUE;
         int min_y = Integer.MAX_VALUE;
         int max_y = Integer.MIN_VALUE;
 
-        localOutBoundEdges = new ArrayList<>(num_local_nodes);
-        localIdToGlobalId = new int[num_local_nodes];
-        for (int i = 0; i < num_local_nodes; i++) {
+        localOutBoundEdges = new ArrayList<>(numLocalNodes);
+        localOutBoundEdgesRev = new ArrayList<>(numLocalNodes);
+        localOutOfShardEdges = new ArrayList<>(numLocalNodes);
+        localIdToGlobalId = new int[numLocalNodes];
+        for (int i = 0; i < numLocalNodes; i++) {
             localOutBoundEdges.add(new ArrayList<>());
+            localOutBoundEdgesRev.add(new ArrayList<>());
+            localOutOfShardEdges.add(new ArrayList<>());
         }
 
         int lastId = 0;
@@ -167,6 +243,11 @@ public class WorkerApp {
             lastId++;
         }
 
+        System.out.println("Worker " + request.getShardId() + " has " + numLocalNodes + " local nodes.");
+        // System.out.println("The node ids are " + Arrays.toString(localIdToGlobalId));
+
+        // System.out.println("Global id to local id map: " + globalIdToLocalId);
+
         for (com.graph.dist.proto.Node n : request.getNodesList()) {
             min_x = Math.min(min_x, n.getX());
             max_x = Math.max(max_x, n.getX());
@@ -174,199 +255,470 @@ public class WorkerApp {
             max_y = Math.max(max_y, n.getY());
         }
 
-        boolean[] isBoundaryNode = new boolean[num_local_nodes];
-        for (int i = 0; i < num_local_nodes; i++) {
+        boolean[] isBoundaryNode = new boolean[numLocalNodes];
+        for (int i = 0; i < numLocalNodes; i++) {
             isBoundaryNode[i] = false;
         }
 
-        int num_boundary_nodes = 0;
-        int num_boundary_edges = 0;
+        int numBoundaryEdges = 0;
+        numBoundaryNodes = 0;
 
-        boundaryIdtoLocalId = new int[num_local_nodes];
-        localIdtoBoundaryId = new int[num_local_nodes];
-        for (int i = 0; i < num_local_nodes; i++) {
+        boundaryIdtoLocalId = new int[numLocalNodes];
+        localIdtoBoundaryId = new int[numLocalNodes];
+        for (int i = 0; i < numLocalNodes; i++) {
             localIdtoBoundaryId[i] = -1;
             boundaryIdtoLocalId[i] = -1;
         }
 
+        System.out.println("Loading edges...");
+
         for (com.graph.dist.proto.Edge e : request.getEdgesList()) {
-            // Note: In distributed graph, some edges might come from nodes not in our
-            // nodeCoords list?
-            // But the proto definition says "edges that originate from nodes in this
-            // shard".
-            // So assert should pass.
+            // System.out.println("Processing edge from " + e.getFrom() + " to " + e.getTo()
+            // + " (to shard " + e.getToShard() + ") with weight " + e.getWeight());
+
             int localIdFrom = globalIdToLocalId.get(e.getFrom());
             if (globalIdToLocalId.get(e.getTo()) == null) {
                 // This is an out-of-shard edge
-                num_boundary_edges++;
+                numBoundaryEdges++;
                 if (isBoundaryNode[localIdFrom] == false) {
-                    boundaryIdtoLocalId[num_boundary_nodes] = localIdFrom;
-                    localIdtoBoundaryId[localIdFrom] = num_boundary_nodes;
-                    num_boundary_nodes++;
+                    boundaryIdtoLocalId[numBoundaryNodes] = localIdFrom;
+                    localIdtoBoundaryId[localIdFrom] = numBoundaryNodes;
+                    numBoundaryNodes++;
                     isBoundaryNode[localIdFrom] = true;
                 }
-                // TODO: Keep the edge info for later processing
+
+                localOutOfShardEdges.get(localIdFrom).add(new OutOfShardEdge(e.getTo(), e.getToShard(), e.getWeight()));
             } else {
                 // This is an internal edge
                 int localIdTo = globalIdToLocalId.get(e.getTo());
                 localOutBoundEdges.get(localIdFrom).add(new InternalEdge(localIdTo, e.getWeight()));
+                localOutBoundEdgesRev.get(localIdTo).add(new InternalEdge(localIdFrom, e.getWeight()));
             }
         }
 
+        System.out.println("Finished loading edges.");
+
         System.out
-                .println("Worker " + request.getShardId() + " loaded " + num_local_nodes + " nodes and "
+                .println("Worker " + request.getShardId() + " loaded " + numLocalNodes + " nodes and "
                         + request.getEdgesCount() + " edges.");
-        System.out.println("Boundary nodes: " + num_boundary_nodes);
-        System.out.println("Boundary edges: " + num_boundary_edges);
+        System.out.println("Boundary nodes: " + numBoundaryNodes);
+        System.out.println("Boundary edges: " + numBoundaryEdges);
         System.out.println("X coordinate range: [" + min_x + ", " + max_x + "]");
         System.out.println("Y coordinate range: [" + min_y + ", " + max_y + "]");
 
-        distBoundary = new int[num_boundary_nodes][num_boundary_nodes];
+        distBoundary = new int[numBoundaryNodes][numBoundaryNodes];
         precomputeBoundaryDistances();
     }
 
     static class GraphServiceImpl extends GraphServiceGrpc.GraphServiceImplBase {
 
         @Override
-        public void solveShortestPath(ShortestPathRequest request,
-                StreamObserver<ShortestPathResponse> responseObserver) {
-            int startGlobalId = request.getStartNode();
-            int endGlobalId = request.getEndNode();
-            boolean startShard = globalIdToLocalId.containsKey(startGlobalId);
-            boolean endShard = globalIdToLocalId.containsKey(endGlobalId);
+        public void prepareForNewQuery(PrepareForNewQueryRequest request,
+                StreamObserver<PrepareForNewQueryResponse> responseObserver) {
+            System.out.println("Received PrepareForNewQuery request for query ID " + request.getQueryId());
 
-            System.out.println("Solving shortest path from " + startGlobalId + " to " + endGlobalId);
+            if (boundaryNodesDistance == null) {
+                boundaryNodesDistance = new int[numBoundaryNodes];
+            }
+            Arrays.fill(boundaryNodesDistance, Integer.MAX_VALUE);
 
-            if (!startShard && !endShard) {
-                responseObserver.onError(
-                        new io.grpc.StatusRuntimeException(io.grpc.Status.INVALID_ARGUMENT
-                                .withDescription("Neither start nor end node is in this shard")));
+            if (lastReportedDistanceToBoundaryNode == null) {
+                lastReportedDistanceToBoundaryNode = new int[numBoundaryNodes];
+            }
+            Arrays.fill(lastReportedDistanceToBoundaryNode, Integer.MAX_VALUE);
+
+            if (boundaryNodesSource == null) {
+                boundaryNodesSource = new ShortestPathSource[numLocalNodes];
+            }
+            Arrays.fill(boundaryNodesSource, null);
+
+            updatesFromOtherShards.clear();
+            nodesToSendToOtherShards.clear();
+
+            if (executor != null) {
+                executor.shutdownNow();
+            }
+
+            executor = Executors.newFixedThreadPool(2);
+            Runnable processUpdatesTask = () -> {
+                System.out.println("Started processing out-of-shard updates thread on worker " + myShardId);
+                int numberOfProcessedUpdates = 0;
+                while (true) {
+                    try {
+                        OutOfShardUpdate update = updatesFromOtherShards.take();
+                        numberOfProcessedUpdates++;
+                        if (numberOfProcessedUpdates % 250 == 0) {
+                            System.out.println(
+                                    "Processed " + numberOfProcessedUpdates + " out-of-shard updates so far...");
+                        }
+                        int toGlobalId = update.toGlobalId;
+                        int fromGlobalId = update.fromGlobalId;
+                        int fromShard = update.fromShard;
+                        int newDistance = update.distance;
+
+                        int toLocalId = globalIdToLocalId.get(toGlobalId);
+
+                        int boundaryId = localIdtoBoundaryId[toLocalId];
+
+                        if (newDistance < boundaryNodesDistance[boundaryId]) {
+                            boundaryNodesDistance[boundaryId] = newDistance;
+                            boundaryNodesSource[boundaryId] = new ShortestPathSource(
+                                    ShortestPathSource.Type.FROM_OUT_OF_SHARD_UPDATE,
+                                    fromGlobalId, fromShard);
+                            nodesToSendToOtherShards.add(toLocalId);
+                            for (int j = 0; j < numBoundaryNodes; j++) {
+                                if (j == boundaryId || distBoundary[boundaryId][j] == Integer.MAX_VALUE)
+                                    continue;
+                                int propagatedDistance = newDistance + distBoundary[boundaryId][j];
+                                if (propagatedDistance < boundaryNodesDistance[j]) {
+                                    boundaryNodesDistance[j] = propagatedDistance;
+                                    boundaryNodesSource[j] = new ShortestPathSource(
+                                            ShortestPathSource.Type.FROM_BOUNDARY_NODE,
+                                            localIdToGlobalId[toLocalId],
+                                            myShardId);
+                                    nodesToSendToOtherShards.add(boundaryIdtoLocalId[j]);
+                                }
+                            }
+                        }
+
+                    } catch (InterruptedException e) {
+                        break; // Exit the loop if interrupted
+                    } catch (Throwable t) {
+                        System.err.println("CRASH in processUpdatesTask!");
+                        t.printStackTrace();
+                    }
+                }
+            };
+
+            Runnable sendUpdatesTask = () -> {
+                // Configuration
+                final int BATCH_SIZE = 50;
+                final long FLUSH_INTERVAL_MS = 50;
+
+                // Buffer: Map<TargetShardID, List<Update>>
+                ArrayList<ArrayList<UpdateDistanceToNodeData>> buffers = new ArrayList<>(workerClients.size());
+                for (int i = 0; i < workerClients.size(); i++) {
+                    buffers.add(new ArrayList<>());
+                }
+                long lastFlushTime = System.currentTimeMillis();
+
+                while (true) {
+                    try {
+                        // Poll with a timeout so we can flush even if queue is empty
+                        Integer localId = nodesToSendToOtherShards.poll(FLUSH_INTERVAL_MS, TimeUnit.MILLISECONDS);
+
+                        long currentTime = System.currentTimeMillis();
+
+                        // If we got an item, add to the correct buffer
+                        if (localId != null) {
+                            int boundaryId = localIdtoBoundaryId[localId];
+                            int distance = boundaryNodesDistance[boundaryId];
+                            int fromGlobalId = localIdToGlobalId[localId];
+
+                            if (distance == lastReportedDistanceToBoundaryNode[boundaryId]) {
+                                // No change since last report, skip
+                                continue;
+                            }
+
+                            lastReportedDistanceToBoundaryNode[boundaryId] = distance;
+
+                            // A node might have edges to MULTIPLE shards.
+                            // We must batch for each target shard separately.
+                            for (OutOfShardEdge edge : localOutOfShardEdges.get(localId)) {
+                                int targetShard = edge.toShard;
+
+                                // Get or create buffer for this shard
+                                ArrayList<UpdateDistanceToNodeData> buffer = buffers.get(targetShard);
+
+                                // Add update
+                                buffer.add(UpdateDistanceToNodeData.newBuilder()
+                                        .setTargetNode(edge.toGlobalId)
+                                        .setDistance(distance + edge.weight)
+                                        .setFromNode(fromGlobalId)
+                                        .build());
+
+                                // 3. Check if THIS buffer is full
+                                if (buffer.size() >= BATCH_SIZE) {
+                                    flushBuffer(targetShard, buffer, request.getQueryId());
+                                }
+                            }
+                        }
+
+                        // 4. Time-based Flush (for all shards)
+                        // If we haven't flushed in a while, send everything pending
+                        if (currentTime - lastFlushTime >= FLUSH_INTERVAL_MS) {
+                            for (int shardId = 0; shardId < buffers.size(); shardId++) {
+                                if (shardId == myShardId)
+                                    continue;
+                                ArrayList<UpdateDistanceToNodeData> buffer = buffers.get(shardId);
+                                flushBuffer(shardId, buffer, request.getQueryId());
+                            }
+                            lastFlushTime = currentTime;
+                        }
+
+                    } catch (InterruptedException e) {
+                        break;
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
+                }
+            };
+
+            executor.submit(processUpdatesTask);
+            executor.submit(sendUpdatesTask);
+
+            PrepareForNewQueryResponse response = PrepareForNewQueryResponse.newBuilder()
+                    .setSuccess(true)
+                    .build();
+
+            System.out.println("Prepared for new query " + request.getQueryId());
+
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();
+        }
+
+        private void flushBuffer(int targetShard, ArrayList<UpdateDistanceToNodeData> buffer, int queryId) {
+            if (buffer.isEmpty())
                 return;
-            }
-
-            if (startShard && endShard) {
-                int startLocalId = globalIdToLocalId.get(startGlobalId);
-                int endLocalId = globalIdToLocalId.get(endGlobalId);
-                int[] dist = dijkstra(
-                        startLocalId);
-
-                int distance = dist[endLocalId];
-                responseObserver.onNext(ShortestPathResponse.newBuilder().setDistance(distance).build());
-                responseObserver.onCompleted();
-                return;
-            }
-
-            else if (startShard) {
-                int startLocalId = globalIdToLocalId.get(startGlobalId);
-                int[] dist = dijkstra(startLocalId);
-
-                // queryDist.put(request.getQueryId(), dist);
-
-                // for (int i = 0; i < distBoundary.length; i++) {
-                // int nodeId = fromBoundaryId.get(i);
-                // relaxOuterEdges(nodeId, dist[nodeId], request.getQueryId());
-                // }
-            }
-
-            else { // endShard
-                int endLocalId = globalIdToLocalId.get(endGlobalId);
-                int[] dist = dijkstra(endLocalId);
-
-                // try {
-                // // W
-                // Thread.sleep(10 * 1000);
-                // } catch (InterruptedException e) {
-                // e.printStackTrace();
-                // }
-
-                // int minDist = Integer.MAX_VALUE;
-                // for (int i = 0; i < distBoundary.length; i++) {
-                // int nodeId = fromBoundaryId.get(i);
-                // int distFromStart = queryDist.get(request.getQueryId()).get(nodeId);
-                // int distToEnd = distFromStart + dist.get(nodeId);
-                // minDist = Integer.min(minDist, distToEnd);
-                // }
-
-                responseObserver.onNext(ShortestPathResponse.newBuilder().setDistance(0).build());
-                responseObserver.onCompleted();
-                return;
-            }
+            workerClients.get(targetShard).batchedUpdateDistanceToNode(queryId, myShardId, buffer);
+            // Clear the buffer after sending
+            buffer.clear();
         }
 
         @Override
-        public void updateShortestPath(UpdateShortestPathRequest request,
-                StreamObserver<UpdateShortestPathResponse> responseObserver) {
-            System.out.println("Received UpdateShortestPath request: from " + request.getFromNode() +
-                    " to " + request.getToNode() + " with new distance " + request.getDistance());
+        public void startShortestPathComputation(StartShortestPathComputationRequest request,
+                StreamObserver<StartShortestPathComputationResponse> responseObserver) {
+            int startGlobalId = request.getStartNode();
+            int startLocalId = globalIdToLocalId.get(startGlobalId);
 
-            // handleUpdate(request);
-            // responseObserver.onNext(UpdateShortestPathResponse.newBuilder().setSuccess(true).build());
-            // responseObserver.onCompleted();
+            System.out.println("Starting shortest path computation from node " + startGlobalId + " (local ID "
+                    + startLocalId + ")");
+
+            Pair<int[], int[]> distAndFrom = dijkstra(startLocalId, localOutBoundEdges);
+            int[] dist = distAndFrom.getFirst();
+
+            for (int i = 0; i < numBoundaryNodes; i++) {
+                boundaryNodesDistance[i] = dist[boundaryIdtoLocalId[i]];
+                if (boundaryNodesDistance[i] != Integer.MAX_VALUE) {
+                    boundaryNodesSource[i] = new ShortestPathSource(ShortestPathSource.Type.FROM_STARTING_NODE,
+                            startGlobalId, myShardId);
+                    nodesToSendToOtherShards.add(boundaryIdtoLocalId[i]);
+                }
+            }
+
+            StartShortestPathComputationResponse response = StartShortestPathComputationResponse.newBuilder()
+                    .setSuccess(true)
+                    .build();
+
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();
         }
-    }
 
-    static void handleUpdate(UpdateShortestPathRequest request) {
-        int queryId = request.getQueryId();
-        int fromGlobalId = request.getFromNode();
-        int fromShard = request.getFromShard();
-        int toGlobalId = request.getToNode();
-        int dist = request.getDistance();
+        @Override
+        public void retrievePath(RetrievePathRequest request,
+                StreamObserver<RetrievePathResponse> responseObserver) {
+            int targetGlobalId = request.getTargetNode();
+            int targetLocalId = globalIdToLocalId.get(targetGlobalId);
 
-        HashMap<Integer, Integer> qDist = queryDist.computeIfAbsent(queryId, k -> new HashMap<>());
-        HashMap<Integer, Pair<Integer, Integer>> qFrom = queryFrom.computeIfAbsent(queryId, k -> new HashMap<>());
+            System.out.println("Retrieving path to target node " + targetGlobalId);
 
-        // if (qDist.getOrDefault(to, Integer.MAX_VALUE) > dist) {
-        // qDist.put(to, dist);
-        // qFrom.put(to, new Pair<>(from, fromShard));
+            RetrievePathResponse.Builder responseBuilder = RetrievePathResponse.newBuilder();
 
-        // int startBoundaryId = toBoundaryId.get(to);
-        // relaxOuterEdges(to, dist, queryId);
-        // for (int i = 0; i < distBoundary.length; i++) {
-        // int nodeId = toBoundaryId.get(i);
+            int distance = Integer.MAX_VALUE;
+            Pair<int[], int[]> distAndFromRev = dijkstra(targetLocalId, localOutBoundEdgesRev);
+            int[] distsRev = distAndFromRev.getFirst();
+            int[] fromRev = distAndFromRev.getSecond();
+            int bestBoundaryId = -1;
+            for (int i = 0; i < numBoundaryNodes; i++) {
+                int boundaryLocalId = boundaryIdtoLocalId[i];
+                if (distsRev[boundaryLocalId] != Integer.MAX_VALUE &&
+                        boundaryNodesDistance[i] != Integer.MAX_VALUE) {
+                    if (boundaryNodesDistance[i] + distsRev[boundaryLocalId] < distance) {
+                        bestBoundaryId = i;
+                        distance = boundaryNodesDistance[i] + distsRev[boundaryLocalId];
+                    }
+                }
+            }
 
-        // if (qDist.getOrDefault(nodeId, Integer.MAX_VALUE) > dist +
-        // distBoundary[startBoundaryId][i]) {
-        // qDist.put(nodeId, dist + distBoundary[startBoundaryId][i]);
-        // qFrom.put(nodeId, new Pair<>(startBoundaryId, my_shard_id));
-        // relaxOuterEdges(nodeId, qDist.get(nodeId), queryId);
-        // }
-        // }
-        // }
-    }
+            System.out.println("Computed distance to target node " + targetGlobalId + " is " + distance);
 
-    static void relaxOuterEdges(int nodeId, int myDist, int queryId) {
-        // for (OutBoundEdge obe : outerEdges.get(nodeId)) {
-        // GraphServiceGrpc.GraphServiceBlockingStub stub =
-        // workerStubs.get(obe.toShard);
-        // System.out.println("Query " + queryId + ": Propagating update from worker " +
-        // my_shard_id + ":" + nodeId
-        // + " to " + obe.toShard + ":" + obe.to);
-        // try {
-        // UpdateShortestPathRequest newRequest = UpdateShortestPathRequest.newBuilder()
-        // .setQueryId(queryId)
-        // .setFromNode(nodeId)
-        // .setFromShard(my_shard_id)
-        // .setToNode(obe.to)
-        // .setDistance(myDist + obe.weight)
-        // .build();
+            if (distance != Integer.MAX_VALUE) {
+                assert bestBoundaryId != -1;
+                // Reconstruct path
+                ArrayList<Integer> path = new ArrayList<>();
+                int currentLocalId = boundaryIdtoLocalId[bestBoundaryId];
 
-        // // This is the call that sends the message to the other worker
-        // stub.updateShortestPath(newRequest);
+                while (currentLocalId != targetLocalId) {
+                    path.add(localIdToGlobalId[currentLocalId]);
+                    currentLocalId = fromRev[currentLocalId];
+                }
+                path.add(localIdToGlobalId[currentLocalId]);
 
-        // } catch (Exception e) {
-        // System.err.println("Failed to send update to worker " + obe.toShard + ": " +
-        // e.getMessage());
-        // }
-        // }
+                System.out.println("Reporting path segment: " + path.toString());
+
+                if (!leaderClient.reportPathSegment(path)) {
+                    throw new RuntimeException("Failed to report path segment to leader.");
+                }
+                if (!workerClients.get(myShardId).tracePath(0,
+                        localIdToGlobalId[boundaryIdtoLocalId[bestBoundaryId]])) {
+                    throw new RuntimeException("Failed to trace path on worker.");
+                }
+            }
+
+            RetrievePathResponse response = responseBuilder
+                    .setDistance(distance)
+                    .build();
+
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();
+        }
+
+        @Override
+        public void isWorkerDone(IsWorkerDoneRequest request,
+                StreamObserver<IsWorkerDoneResponse> responseObserver) {
+            int updatesFromOtherShardsSize = updatesFromOtherShards.size();
+            int nodesToSendToOtherShardsSize = nodesToSendToOtherShards.size();
+            boolean done = (updatesFromOtherShardsSize == 0) && (nodesToSendToOtherShardsSize == 0);
+            System.out.println("isWorkerDone called. Done status: " + done +
+                    " (updatesFromOtherShardsSize=" + updatesFromOtherShardsSize +
+                    ", nodesToSendToOtherShardsSize=" + nodesToSendToOtherShardsSize + ")");
+            IsWorkerDoneResponse response = IsWorkerDoneResponse.newBuilder()
+                    .setDone(done)
+                    .build();
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();
+        }
+
+        @Override
+        public void batchedUpdateDistanceToNode(BatchedUpdateDistanceToNodeRequest request,
+                StreamObserver<BatchedUpdateDistanceToNodeResponse> responseObserver) {
+            int fromShard = request.getFromShard();
+
+            for (UpdateDistanceToNodeData data : request.getUpdatesList()) {
+                updatesFromOtherShards.add(new OutOfShardUpdate(
+                        data.getTargetNode(),
+                        data.getFromNode(),
+                        fromShard,
+                        data.getDistance()));
+            }
+
+            BatchedUpdateDistanceToNodeResponse response = BatchedUpdateDistanceToNodeResponse.newBuilder()
+                    .setSuccess(true)
+                    .build();
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();
+        }
+
+        @Override
+        public void tracePath(TracePathRequest request,
+                StreamObserver<TracePathResponse> responseObserver) {
+            System.out.println("Received TracePath request for source node " + request.getSourceNode());
+
+            int globalId = request.getSourceNode();
+            int localId = globalIdToLocalId.get(globalId);
+
+            int boundaryId = localIdtoBoundaryId[localId];
+
+            ShortestPathSource source = boundaryNodesSource[boundaryId];
+
+            ArrayList<Integer> path = new ArrayList<>();
+
+            if (source.getType() == ShortestPathSource.Type.FROM_STARTING_NODE ||
+                    source.getType() == ShortestPathSource.Type.FROM_BOUNDARY_NODE) {
+                int fromGlobalId = source.getFromGlobalId();
+                int fromLocalId = globalIdToLocalId.get(fromGlobalId);
+
+                Pair<int[], int[]> distAndFrom = dijkstra(fromLocalId, localOutBoundEdges);
+                int[] from = distAndFrom.getSecond();
+
+                // Reconstruct path
+                int currentLocalId = localId;
+                while (currentLocalId != fromLocalId) {
+                    path.add(localIdToGlobalId[currentLocalId]);
+                    currentLocalId = from[currentLocalId];
+                }
+                path.add(localIdToGlobalId[fromLocalId]);
+
+                // Reverse the path
+                Collections.reverse(path);
+
+            } else {
+                // Path starts from an out-of-shard update, so just report the single node
+                path.add(globalId);
+            }
+
+            System.out.println("Reporting path segment: " + path.toString());
+
+            if (!leaderClient.reportPathSegment(path)) {
+                throw new RuntimeException("Failed to report path segment to leader.");
+            }
+
+            if (source.getType() == ShortestPathSource.Type.FROM_BOUNDARY_NODE ||
+                    source.getType() == ShortestPathSource.Type.FROM_OUT_OF_SHARD_UPDATE) {
+                // Continue tracing from the source node
+                System.out.println("Continuing trace path to source node " + source.getFromGlobalId()
+                        + " from shard " + source.getFromShard());
+                if (!workerClients.get(source.getFromShard()).tracePath(0, source.getFromGlobalId())) {
+                    throw new RuntimeException("Failed to trace path on worker.");
+                }
+            }
+
+            TracePathResponse response = TracePathResponse.newBuilder()
+                    .setSuccess(true)
+                    .build();
+
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();
+        }
+
+        @Override
+        public void getIntraShardPath(GetIntraShardPathRequest request,
+                StreamObserver<GetIntraShardPathResponse> responseObserver) {
+            int fromGlobalId = request.getFromNode();
+            int toGlobalId = request.getToNode();
+            int fromLocalId = globalIdToLocalId.get(fromGlobalId);
+            int toLocalId = globalIdToLocalId.get(toGlobalId);
+
+            Pair<int[], int[]> distFromAndFrom = dijkstra(fromLocalId, localOutBoundEdges);
+            int[] distances = distFromAndFrom.getFirst();
+            int[] from = distFromAndFrom.getSecond();
+
+            int distance = distances[toLocalId];
+
+            ArrayList<Integer> path = new ArrayList<>();
+
+            if (distance != Integer.MAX_VALUE) {
+                // Reconstruct path
+                int currentLocalId = toLocalId;
+                while (currentLocalId != fromLocalId) {
+                    path.add(localIdToGlobalId[currentLocalId]);
+                    currentLocalId = from[currentLocalId];
+                }
+                path.add(localIdToGlobalId[fromLocalId]);
+
+                // Reverse the path
+                Collections.reverse(path);
+            }
+
+            GetIntraShardPathResponse response = GetIntraShardPathResponse.newBuilder()
+                    .setDistance(distance)
+                    .addAllPath(path)
+                    .build();
+
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();
+        }
     }
 
     static void precomputeBoundaryDistances() {
         for (int i = 0; i < distBoundary.length; i++) {
-            System.out.println("Precomputing distances from boundary node " + boundaryIdtoLocalId[i] + " (" + (i + 1)
-                    + "/" + distBoundary.length + ")");
+            System.out
+                    .println("Precomputing distances from boundary node " + localIdToGlobalId[boundaryIdtoLocalId[i]]
+                            + " (" + (i + 1)
+                            + "/" + distBoundary.length + ")");
 
-            int[] dist = dijkstra(
-                    boundaryIdtoLocalId[i]);
+            Pair<int[], int[]> distFromAndFrom = dijkstra(boundaryIdtoLocalId[i], localOutBoundEdges);
+            int[] dist = distFromAndFrom.getFirst();
 
             for (int j = 0; j < distBoundary.length; j++) {
                 distBoundary[i][j] = dist[boundaryIdtoLocalId[j]];
@@ -374,12 +726,14 @@ public class WorkerApp {
         }
     }
 
-    static int[] dijkstra(int sourceLocalId) {
-        int[] dist = new int[num_local_nodes];
-        boolean[] visited = new boolean[num_local_nodes];
-        for (int i = 0; i < num_local_nodes; i++) {
+    static Pair<int[], int[]> dijkstra(int sourceLocalId, ArrayList<ArrayList<InternalEdge>> localEdges) {
+        int[] dist = new int[numLocalNodes];
+        int[] from = new int[numLocalNodes];
+        boolean[] visited = new boolean[numLocalNodes];
+        for (int i = 0; i < numLocalNodes; i++) {
             dist[i] = Integer.MAX_VALUE;
             visited[i] = false;
+            from[i] = -1;
         }
         dist[sourceLocalId] = 0;
 
@@ -390,20 +744,21 @@ public class WorkerApp {
         while (!pq.isEmpty()) {
             Pair<Integer, Integer> p = pq.poll();
             int currentDist = p.getFirst();
-            int u = p.getSecond();
-            if (visited[u])
+            int localId = p.getSecond();
+            if (visited[localId])
                 continue;
-            visited[u] = true;
-            for (InternalEdge v : localOutBoundEdges.get(u)) {
+            visited[localId] = true;
+            for (InternalEdge v : localEdges.get(localId)) {
                 if (visited[v.toLocalId])
                     continue;
                 int newDist = currentDist + v.weight;
                 if (newDist < dist[v.toLocalId]) {
                     dist[v.toLocalId] = newDist;
                     pq.add(new Pair<>(newDist, v.toLocalId));
+                    from[v.toLocalId] = localId;
                 }
             }
         }
-        return dist;
+        return new Pair<>(dist, from);
     }
 }

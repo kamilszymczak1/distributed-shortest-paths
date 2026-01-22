@@ -1,0 +1,120 @@
+syntax = "proto3";
+option java_multiple_files = true;
+package com.graph.dist.proto;
+
+
+message PrepareForNewQueryRequest {
+  int32 queryId = 1;
+}
+
+message PrepareForNewQueryResponse {
+  bool success = 1;
+}
+
+message StartShortestPathComputationRequest {
+  int32 startNode = 1;
+}
+
+message StartShortestPathComputationResponse {
+  bool success = 1;
+}
+
+message RetrievePathRequest {
+    int32 queryId = 1;
+    int32 targetNode = 2;
+}
+
+message RetrievePathResponse {
+    int32 distance = 1;
+}
+
+message BatchedUpdateDistanceToNodeRequest {
+    int32 queryId = 1;
+    int32 fromShard = 2;
+    repeated UpdateDistanceToNodeData updates = 3;
+}
+
+message UpdateDistanceToNodeData {
+    int32 targetNode = 1;
+    int32 fromNode = 2;
+    int32 distance = 3;
+}
+
+message BatchedUpdateDistanceToNodeResponse {
+    bool success = 1;
+}
+
+message GetIntraShardPathRequest {
+    int32 fromNode = 1;
+    int32 toNode = 2;
+}
+
+message GetIntraShardPathResponse {
+    int32 distance = 1;
+    repeated int32 path = 2;
+}
+
+message TracePathRequest {
+    int32 queryId = 1;
+    int32 sourceNode = 2;
+}
+
+message TracePathResponse {
+    bool success = 1;
+}
+
+message IsWorkerDoneRequest {
+}
+
+message IsWorkerDoneResponse {
+  bool done = 1;
+}
+
+service GraphService {
+  rpc PrepareForNewQuery(PrepareForNewQueryRequest) returns (PrepareForNewQueryResponse);
+  rpc BatchedUpdateDistanceToNode(BatchedUpdateDistanceToNodeRequest) returns (BatchedUpdateDistanceToNodeResponse);
+  rpc StartShortestPathComputation(StartShortestPathComputationRequest) returns (StartShortestPathComputationResponse);
+  rpc RetrievePath(RetrievePathRequest) returns (RetrievePathResponse);
+  rpc GetIntraShardPath(GetIntraShardPathRequest) returns (GetIntraShardPathResponse);
+  rpc TracePath(TracePathRequest) returns (TracePathResponse);
+  rpc IsWorkerDone(IsWorkerDoneRequest) returns (IsWorkerDoneResponse);
+}
+
+message Node {
+  int32 id = 1;
+  int32 x = 2;
+  int32 y = 3;
+}
+
+// Edges are directed. The shard of the 'from' node
+// is implied by the shard data containing this edge.
+message Edge {
+  int32 from = 1;
+  int32 to = 2;
+  int32 to_shard = 3;
+  int32 weight = 4;
+}
+
+message ShardData {
+  int32 shard_id = 1;
+  repeated Node nodes = 2;
+  repeated Edge edges = 3;
+}
+
+message ShardRequest {
+  int32 worker_id = 1;
+}
+
+message ReportPathSegmentRequest {
+    int32 queryId = 1;
+    repeated int32 pathSegment = 2;
+}
+
+message ReportPathSegmentResponse {
+    bool success = 1;
+}
+
+service LeaderService {
+    rpc GetShard(ShardRequest) returns (ShardData);
+    rpc ReportPathSegment(ReportPathSegmentRequest) returns (ReportPathSegmentResponse);
+}
