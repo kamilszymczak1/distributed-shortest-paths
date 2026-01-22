@@ -1,18 +1,21 @@
 package com.graph.dist.leader;
 
-import com.graph.dist.proto.Edge;
 import com.graph.dist.proto.LeaderServiceGrpc;
-import com.graph.dist.proto.Node;
 import com.graph.dist.proto.ShardData;
 import com.graph.dist.proto.ShardRequest;
 import com.graph.dist.utils.Point;
+import com.graph.dist.utils.WorkerClient;
+
 import io.grpc.Server;
 import io.grpc.ServerBuilder;
 import io.grpc.stub.StreamObserver;
-import java.util.HashMap;
+
+import org.jgrapht.alg.util.Pair;
+
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 import io.javalin.Javalin;
 
 public class LeaderApp {
@@ -20,18 +23,29 @@ public class LeaderApp {
     private static ShardManager shardManager;
     private static ApiHandler apiHandler;
 
+    private static ArrayList<WorkerClient> workerClients = new ArrayList<>();
+
+    private static ArrayList<ArrayList<Integer>> pathSegments;
+
     public static int getNumWorkers() {
         String numWorkers = System.getenv().getOrDefault("NUM_WORKERS", "1");
         return Integer.parseInt(numWorkers);
     }
 
+    private static String getWorkerHost(int shardId) {
+        String workerServiceName = System.getenv().getOrDefault("WORKER_SERVICE_NAME", "worker");
+        String namespace = System.getenv().getOrDefault("NAMESPACE", "");
+        String host;
+        if (namespace.isEmpty()) {
+            host = "worker-" + shardId;
+        } else {
+            host = "worker-" + shardId + "." + workerServiceName + "." + namespace + ".svc.cluster.local";
+        }
+        return host;
+    }
+
     public static void main(String[] args) throws Exception {
         System.out.println("Leader starting...");
-
-        apiHandler = new ApiHandler();
-
-        Javalin app = Javalin.create().start(8080);
-        app.get("/shortest-path", apiHandler::handleShortestPath);
 
         Map<Integer, Point> coords = null;
         String coPath = "/data/graph.co.gz";
@@ -47,18 +61,30 @@ public class LeaderApp {
 
         int numWorkers = getNumWorkers();
 
+        for (int i = 0; i < numWorkers; i++) {
+            String host = getWorkerHost(i);
+            int workerPort = Integer.parseInt(System.getenv().getOrDefault("WORKER_PORT", "9090"));
+            WorkerClient client = new WorkerClient(host, workerPort);
+            workerClients.add(client);
+        }
+
         // Create shards
         shardManager = new ShardManager(coords, grPath, numWorkers);
         shardManager.createShards();
-        
+
+        apiHandler = new ApiHandler();
+
+        Javalin app = Javalin.create().start(8080);
+        app.get("/shortest-path", apiHandler::handleShortestPath);
+
         System.out.println("Leader initialization complete. Starting gRPC server on port 9090...");
-        
+
         // Start gRPC server to serve shards
         Server server = ServerBuilder.forPort(9090)
                 .addService(new LeaderServiceImpl())
-                .maxInboundMessageSize(50 * 1024 * 1024) 
+                .maxInboundMessageSize(50 * 1024 * 1024)
                 .build();
-                
+
         server.start();
         System.out.println("Leader server started. Waiting for workers to connect...");
         server.awaitTermination();
@@ -69,93 +95,167 @@ public class LeaderApp {
         public void getShard(ShardRequest request, StreamObserver<ShardData> responseObserver) {
             int workerId = request.getWorkerId();
             System.out.println("Received shard request from worker-" + workerId);
-            
+
             ShardData data = shardManager.getShardData(workerId);
-            
+
             if (data != null) {
-                System.out.println("Serving shard " + workerId + " to worker-" + workerId);
+                System.out.println("Serving shard " + workerId + " to worker-" + workerId + ". It has "
+                        + data.getNodesCount() + " nodes and "
+                        + data.getEdgesCount() + " edges.");
                 responseObserver.onNext(data);
                 responseObserver.onCompleted();
             } else {
                 System.err.println("Shard " + workerId + " not found!");
                 responseObserver.onError(io.grpc.Status.NOT_FOUND
-                    .withDescription("Shard " + workerId + " not found")
-                    .asRuntimeException());
+                        .withDescription("Shard " + workerId + " not found")
+                        .asRuntimeException());
             }
         }
-    }
 
-    private static Map<Integer, Integer> splitNodesIntoShards(DimacsParser.GraphData data, int numWorkers) {
-        Map<Integer, Integer> nodeToShard = new HashMap<>();
-        int currentShard = 0;
-        for (Integer nodeId : data.coords.keySet()) {
-            nodeToShard.put(nodeId, currentShard);
-            currentShard = (currentShard + 1) % numWorkers;
+        @Override
+        public void reportPathSegment(com.graph.dist.proto.ReportPathSegmentRequest request,
+                StreamObserver<com.graph.dist.proto.ReportPathSegmentResponse> responseObserver) {
+            System.out.println("Received path segment report with " + request.getPathSegmentCount() + " nodes.");
+            System.out.println("Path segment: " + request.getPathSegmentList().toString());
+
+            pathSegments.add(new ArrayList<>(request.getPathSegmentList()));
+
+            com.graph.dist.proto.ReportPathSegmentResponse response = com.graph.dist.proto.ReportPathSegmentResponse
+                    .newBuilder()
+                    .setSuccess(true)
+                    .build();
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();
         }
-        return nodeToShard;
     }
 
-    public static void distributeShards(DimacsParser.GraphData data, int numWorkers) {
-        System.out.println("Distributing shards to " + numWorkers + " workers...");
+    public static ShortestPathResult findShortestPath(int fromId, int toId) {
+        int numWorkers = LeaderApp.getNumWorkers();
 
-        Map<Integer, Integer> nodeToShard = splitNodesIntoShards(data, numWorkers);
+        int fromShard = shardManager.getShardIdForNode(fromId);
+        int toShard = shardManager.getShardIdForNode(toId);
 
-        // Prepare shard data builders
-        List<ShardData.Builder> builders = java.util.stream.IntStream.range(0, numWorkers)
-                .mapToObj(i -> {
-                    ShardData.Builder builder = ShardData.newBuilder();
-                    builder.setShardId(i);
-                    return builder;
-                })
-                .collect(Collectors.toList());
+        if (fromShard == -1) {
+            throw new IllegalArgumentException("Start node " + fromId + " not found in any shard.");
+        }
+        if (toShard == -1) {
+            throw new IllegalArgumentException("End node " + toId + " not found in any shard.");
+        }
 
-        // Add nodes with coordinates to respective shards
-        data.coords.forEach((nodeId, pt) -> {
-            int shardId = nodeToShard.get(nodeId);
-            builders.get(shardId).addNodes(
-                    Node.newBuilder()
-                            .setId(nodeId)
-                            .setX(pt.x)
-                            .setY(pt.y)
-                            .build());
-        });
-
-        // Add edges to respective shards
-        data.edges.forEach((edge) -> {
-            int fromShard = nodeToShard.get(edge.from);
-            int toShard = nodeToShard.get(edge.to);
-
-            builders.get(fromShard).addEdges(
-                    Edge.newBuilder()
-                            .setFrom(edge.from)
-                            .setTo(edge.to)
-                            .setToShard(toShard)
-                            .setWeight(edge.weight)
-                            .build());
-        });
-
-        // 4. Send to Workers
-        String workerServiceName = System.getenv().getOrDefault("WORKER_SERVICE_NAME", "worker");
-        String namespace = System.getenv().getOrDefault("NAMESPACE", "");
-        int workerPort = Integer.parseInt(System.getenv().getOrDefault("WORKER_PORT", "9090"));
-        
         for (int i = 0; i < numWorkers; i++) {
-            // For Kubernetes StatefulSet: worker-0.worker.graph-dist.svc.cluster.local
-            // For Docker Compose: worker-0
-            String host;
-            if (namespace.isEmpty()) {
-                // Docker Compose mode
-                host = "worker-" + i;
+            WorkerClient client = workerClients.get(i);
+            boolean prepared = client.prepareForNewQuery();
+            if (prepared) {
+                System.out.println("Prepared worker-" + i + " for new query.");
             } else {
-                // Kubernetes mode: <pod-name>.<service-name>.<namespace>.svc.cluster.local
-                host = "worker-" + i + "." + workerServiceName + "." + namespace + ".svc.cluster.local";
+                throw new RuntimeException("Failed to prepare worker-" + i + " for new query.");
             }
-            
-            System.out.println("Sending shard " + i + " to " + host + " with "
-                    + builders.get(i).getNodesCount() + " nodes.");
-            WorkerClient client = new WorkerClient(host, workerPort);
-            client.loadShard(builders.get(i).build());
-            client.shutdown();
+        }
+
+        if (!workerClients.get(fromShard).startShortestPathComputation(fromId)) {
+            throw new RuntimeException(
+                    "Failed to start shortest path computation on worker for shard " + fromShard);
+        }
+
+        System.out
+                .println("Shortest path computation started from node " + fromId + " (shard " + fromShard + ") to node "
+                        + toId + " (shard " + toShard + ").");
+
+        while (true) {
+            try {
+                Thread.sleep(200);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Interrupted while waiting for computation to complete", e);
+            }
+
+            System.out.println("Checking if all workers are done...");
+
+            boolean allDone = true;
+
+            for (int i = 0; i < numWorkers; i++) {
+                WorkerClient client = workerClients.get(i);
+                if (!client.isWorkerDone()) {
+                    System.out.println("Worker-" + i + " is not done yet.");
+                    allDone = false;
+                } else {
+                    System.out.println("Worker-" + i + " is done.");
+                }
+            }
+
+            if (allDone) {
+                for (int i = 0; i < numWorkers; i++) {
+                    WorkerClient client = workerClients.get(i);
+                    if (!client.isWorkerDone()) {
+                        allDone = false;
+                    }
+                }
+                if (allDone) {
+                    break;
+                }
+            }
+        }
+
+        pathSegments = new ArrayList<>();
+
+        int interShardDistance = workerClients.get(toShard).retrievePath(toId);
+
+        int distance = interShardDistance;
+        ArrayList<Integer> path = combinePaths(pathSegments);
+
+        System.out.println(
+                "Distance from node " + fromId + " to node " + toId + " via inter-shard computation is "
+                        + interShardDistance);
+
+        if (fromShard == toShard) {
+
+            Pair<Integer, ArrayList<Integer>> intraShardResult = workerClients.get(fromShard).getIntraShardPath(fromId,
+                    toId);
+            int intraShardDistance = intraShardResult.getFirst();
+            ArrayList<Integer> intraShardPath = intraShardResult.getSecond();
+
+            if (intraShardDistance < distance) {
+                distance = intraShardDistance;
+                path = intraShardPath;
+            }
+
+            System.out.println("Both nodes are in the same shard " + fromShard + ".");
+            System.out.println("Intra-shard distance from node " + fromId + " to node " + toId + " is "
+                    + intraShardDistance);
+        }
+
+        System.out.println("Distance from node " + fromId + " to node " + toId + " is " + distance);
+
+        return new ShortestPathResult(distance, path);
+    }
+
+    public static ArrayList<Integer> combinePaths(ArrayList<ArrayList<Integer>> segments) {
+        // The segments are collected in reverse order, so we need to reverse them first
+        Collections.reverse(segments);
+
+        System.out.println("Combining " + segments.size() + " path segments.");
+
+        ArrayList<Integer> fullPath = new ArrayList<>();
+        for (ArrayList<Integer> segment : segments) {
+            System.out.println("Segment: " + segment.toString());
+            if (fullPath.isEmpty() || fullPath.get(fullPath.size() - 1) != segment.get(0)) {
+                fullPath.addAll(segment);
+            } else {
+                // Avoid duplicating the connecting node
+                fullPath.addAll(segment.subList(1, segment.size()));
+            }
+        }
+        return fullPath;
+    }
+
+    // A simple class to hold the result
+    public static class ShortestPathResult {
+        public int distance;
+        public List<Integer> path;
+
+        public ShortestPathResult(int distance, List<Integer> path) {
+            this.distance = distance;
+            this.path = path;
         }
     }
 }
