@@ -3,7 +3,11 @@ package com.graph.dist.leader;
 import com.graph.dist.utils.Point;
 import java.io.*;
 import java.util.*;
+import java.util.stream.Stream;
+import java.util.stream.StreamSupport;
 import java.util.zip.GZIPInputStream;
+
+
 
 public class DimacsParser {
     public static class Edge {
@@ -17,61 +21,163 @@ public class DimacsParser {
             this.weight = weight;
         }
     }
+    /**
+     * Iterator that streams edges from a .gr.gz file without loading all into memory.
+     */
+    public static class EdgeIterator implements Iterator<Edge>, Closeable {
+        private final BufferedReader reader;
+        private Edge nextEdge;
+        private boolean closed = false;
 
-    public static class GraphData {
-        public Map<Integer, Point> coords = new HashMap<>();
-        public List<Edge> edges = new ArrayList<>();
-    }
-
-    public static GraphData parse(String coPath, String grPath) throws IOException {
-        GraphData data = new GraphData();
-        data.coords = parseCoordinates(coPath);
-
-        // 2. Read Edges (.gr.gz)
-        try (BufferedReader br = new BufferedReader(
-                new InputStreamReader(new GZIPInputStream(new FileInputStream(grPath))))) {
-            String line;
-            while ((line = br.readLine()) != null) {
-                if (line.startsWith("a ")) {
-                    String[] p = line.split("\\s+");
-                    int from = Integer.parseInt(p[1]);
-                    int to = Integer.parseInt(p[2]);
-                    int weight = Integer.parseInt(p[3]);
-                    data.edges.add(new Edge(from, to, weight));
-                }
-            }
+        public EdgeIterator(String edgePathName) throws IOException {
+            this.reader = new BufferedReader(
+                    new InputStreamReader(new GZIPInputStream(new FileInputStream(edgePathName))));
+            advance();
         }
-        return data;
-    }
 
-    public static Map<Integer, Point> parseCoordinates(String coPath) throws IOException {
-        Map<Integer, Point> coords = new HashMap<>();
-
-        int min_x = Integer.MAX_VALUE;
-        int min_y = Integer.MAX_VALUE;
-
-        // 1. Read Coordinates (.co.gz)
-        try (BufferedReader br = new BufferedReader(
-                new InputStreamReader(new GZIPInputStream(new FileInputStream(coPath))))) {
-            String line;
-            while ((line = br.readLine()) != null) {
-                if (line.startsWith("v ")) {
-                    String[] p = line.split("\\s+");
-                    int id = Integer.parseInt(p[1]);
-                    int x = Integer.parseInt(p[2]);
-                    int y = Integer.parseInt(p[3]);
-                    min_x = Math.min(min_x, x);
-                    min_y = Math.min(min_y, y);
-                    coords.put(id, new Point(x, y));
+        private void advance() {
+            if (closed) {
+                nextEdge = null;
+                return;
+            }
+            try {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (line.startsWith("a ")) {
+                        String[] p = line.split("\\s+");
+                        int from = Integer.parseInt(p[1]);
+                        int to = Integer.parseInt(p[2]);
+                        int weight = Integer.parseInt(p[3]);
+                        nextEdge = new Edge(from, to, weight);
+                        return;
+                    }
                 }
+                nextEdge = null;
+                close();
+            } catch (IOException e) {
+                nextEdge = null;
+                try { close(); } catch (IOException ignored) {}
             }
         }
 
-        // Normalize coordinates to start from (0,0)
-        for (Point pt : coords.values()) {
-            pt.x -= min_x;
-            pt.y -= min_y;
+        @Override
+        public boolean hasNext() {
+            return nextEdge != null;
         }
-        return coords;
+
+        @Override
+        public Edge next() {
+            if (nextEdge == null) {
+                throw new NoSuchElementException();
+            }
+            Edge current = nextEdge;
+            advance();
+            return current;
+        }
+
+        @Override
+        public void close() throws IOException {
+            if (!closed) {
+                closed = true;
+                reader.close();
+            }
+        }
+    }
+
+    /**
+     * Returns a Stream of edges that reads lazily from the file.
+     * The stream should be used in a try-with-resources to ensure the file is closed.
+     */
+    public static Stream<Edge> streamEdges(String edgePathName) throws IOException {
+        EdgeIterator iterator = new EdgeIterator(edgePathName);
+        Spliterator<Edge> spliterator = Spliterators.spliteratorUnknownSize(iterator, Spliterator.ORDERED);
+        return StreamSupport.stream(spliterator, false).onClose(() -> {
+            try { iterator.close(); } catch (IOException ignored) {}
+        });
+    }
+
+    public static class Vertex {
+        public int id;
+        public Point point;
+
+        public Vertex(int id, Point point) {
+            this.id = id;
+            this.point = point;
+        }
+    }
+
+    /**
+     * Iterator that streams vertices from a .co.gz file without loading all into memory.
+     */
+    public static class VertexIterator implements Iterator<Vertex>, Closeable {
+        private final BufferedReader reader;
+        private Vertex nextVertex;
+        private boolean closed = false;
+
+        public VertexIterator(String vertexPathName) throws IOException {
+            this.reader = new BufferedReader(
+                    new InputStreamReader(new GZIPInputStream(new FileInputStream(vertexPathName))));
+            advance();
+        }
+
+        private void advance() {
+            if (closed) {
+                nextVertex = null;
+                return;
+            }
+            try {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (line.startsWith("v ")) {
+                        String[] p = line.split("\\s+");
+                        int id = Integer.parseInt(p[1]);
+                        int x = Integer.parseInt(p[2]);
+                        int y = Integer.parseInt(p[3]);
+                        nextVertex = new Vertex(id, new Point(x, y));
+                        return;
+                    }
+                }
+                nextVertex = null;
+                close();
+            } catch (IOException e) {
+                nextVertex = null;
+                try { close(); } catch (IOException ignored) {}
+            }
+        }
+
+        @Override
+        public boolean hasNext() {
+            return nextVertex != null;
+        }
+
+        @Override
+        public Vertex next() {
+            if (nextVertex == null) {
+                throw new NoSuchElementException();
+            }
+            Vertex current = nextVertex;
+            advance();
+            return current;
+        }
+
+        @Override
+        public void close() throws IOException {
+            if (!closed) {
+                closed = true;
+                reader.close();
+            }
+        }
+    }
+
+    /**
+     * Returns a Stream of vertices that reads lazily from the file.
+     * The stream should be used in a try-with-resources to ensure the file is closed.
+     */
+    public static Stream<Vertex> streamVertices(String vertexPathName) throws IOException {
+        VertexIterator iterator = new VertexIterator(vertexPathName);
+        Spliterator<Vertex> spliterator = Spliterators.spliteratorUnknownSize(iterator, Spliterator.ORDERED);
+        return StreamSupport.stream(spliterator, false).onClose(() -> {
+            try { iterator.close(); } catch (IOException ignored) {}
+        });
     }
 }

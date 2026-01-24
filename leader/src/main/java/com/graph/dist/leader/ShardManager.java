@@ -1,30 +1,144 @@
 package com.graph.dist.leader;
 
 import com.graph.dist.utils.Point;
+import com.graph.dist.proto.ShardData;
+import com.graph.dist.proto.Node;
+import com.graph.dist.proto.Edge;
 import java.util.*;
 import java.io.*;
-import java.util.zip.GZIPInputStream;
+
+import org.jgrapht.alg.util.Pair;
 
 /**
  * Manages the creation and distribution of shards.
  * Keeps track of shards so they can be resent to workers if pods restart.
+ * 
+ * Shards are represented as disjoint rectangles. The file is only read
+ * when shard data is requested.
  */
 public class ShardManager {
 
-    private final Map<Integer, Point> coords;
+    private final String coordinateFilePath;
     private final String edgeFilePath;
     private final int numWorkers;
 
-    // Stores the final shards indexed by shard ID (worker index)
-    private final Map<Integer, Shard> shardAssignments = new HashMap<>();
+    // Stores the shard rectangles indexed by shard ID (worker index)
+    // Only stores bounds, not the actual nodes
+    private final ArrayList<ShardBounds> shardBounds = new ArrayList<>();
 
-    // Maps node ID to shard ID for quick lookup
-    private Map<Integer, Integer> nodeToShardId;
+    /**
+     * Represents the rectangular bounds of a shard (disjoint rectangles).
+     */
+    private static class ShardBounds {
+        private final int xMin, xMax, yMin, yMax;
 
-    public ShardManager(Map<Integer, Point> coords, String edgeFilePath, int numWorkers) {
-        this.coords = coords;
+        public ShardBounds(int xMin, int xMax, int yMin, int yMax) {
+            this.xMin = xMin;
+            this.xMax = xMax;
+            this.yMin = yMin;
+            this.yMax = yMax;
+        }
+
+        public boolean contains(int x, int y) {
+            return x >= xMin && x <= xMax && y >= yMin && y <= yMax;
+        }
+
+        @Override
+        public String toString() {
+            return String.format("ShardBounds[x:(%d,%d), y:(%d,%d)]", xMin, xMax, yMin, yMax);
+        }
+    }
+
+    private static class Shard {
+        private final ArrayList<Pair<Integer, Point>> nodes; // List of (nodeId, Point)
+
+        public Shard(ArrayList<Pair<Integer, Point>> nodes) {
+            assert nodes != null && !nodes.isEmpty();
+            this.nodes = nodes;
+        }
+
+        public int getMaxX() {
+            return nodes.stream().mapToInt(p -> p.getSecond().x).max().orElse(0);
+        }
+
+        public int getMinX() {
+            return nodes.stream().mapToInt(p -> p.getSecond().x).min().orElse(0);
+        }
+
+        public int getMaxY() {
+            return nodes.stream().mapToInt(p -> p.getSecond().y).max().orElse(0);
+        }
+
+        public int getMinY() {
+            return nodes.stream().mapToInt(p -> p.getSecond().y).min().orElse(0);
+        }
+
+        public int getNodeCount() {
+            return nodes.size();
+        }
+
+        public Pair<Shard, Shard> split() {
+            if (nodes.size() <= 1) {
+                return null;
+            }
+            // Determine split direction
+            boolean splitVertically = (getMaxX() - getMinX()) >= (getMaxY() - getMinY());
+
+            // If splitting horizontally, swap x and y for sorting
+            if (!splitVertically) {
+                swapXY(nodes);
+            }
+
+            // Sort nodes by x coordinate
+            nodes.sort(Comparator.comparingInt(p -> p.getSecond().x));
+
+            int size = nodes.size();
+
+            int middleX = size % 2 == 0
+                    ? (nodes.get(size / 2 - 1).getSecond().x + nodes.get(size / 2).getSecond().x) / 2
+                    : nodes.get(size / 2).getSecond().x;
+
+            ArrayList<Pair<Integer, Point>> leftNodes = new ArrayList<>();
+            ArrayList<Pair<Integer, Point>> rightNodes = new ArrayList<>();
+
+            for (var p : nodes) {
+                if (p.getSecond().x <= middleX) {
+                    leftNodes.add(p);
+                } else {
+                    rightNodes.add(p);
+                }
+            }
+
+            if (!splitVertically) {
+                // Swap back x and y
+                swapXY(leftNodes);
+                swapXY(rightNodes);
+            }
+
+            return new Pair<>(new Shard(leftNodes), new Shard(rightNodes));
+        }
+
+        private void swapXY(ArrayList<Pair<Integer, Point>> nodeList) {
+            for (var p : nodeList) {
+                int temp = p.getSecond().x;
+                p.getSecond().x = p.getSecond().y;
+                p.getSecond().y = temp;
+            }
+        }
+
+        @Override public String toString() {
+            return String.format("Shard[nodes:%d, x:(%d,%d), y:(%d,%d)]",
+                    getNodeCount(), getMinX(), getMaxX(), getMinY(), getMaxY());
+        }
+    }
+
+    public ShardManager(String coordinateFilePath, String edgeFilePath, int numWorkers) {
+        this.coordinateFilePath = coordinateFilePath;
         this.edgeFilePath = edgeFilePath;
         this.numWorkers = numWorkers;
+
+        // Perform sharding upon construction
+        createShards();
     }
 
     /**
@@ -35,7 +149,7 @@ public class ShardManager {
      * 1. Start with one shard containing all nodes
      * 2. Use a max-heap (priority queue) sorted by node count
      * 3. Repeatedly pick the largest shard and split it along the longer edge
-     * 4. Use binary search to find the optimal split coordinate
+     * 4. Split it into two shards with approximately equal number of nodes
      * 5. Continue until n_shards == n_workers
      */
     public void createShards() {
@@ -46,7 +160,15 @@ public class ShardManager {
                 Comparator.comparingInt(Shard::getNodeCount).reversed());
 
         // Start with a single shard containing all nodes
-        Shard initialShard = Shard.createInitialShard(coords);
+        ArrayList<Pair<Integer, Point>> coords;
+        try (var vertexStream = DimacsParser.streamVertices(coordinateFilePath)) {
+            coords = vertexStream.map(v -> {
+                return new Pair<Integer, Point>(v.id, v.point);
+            }).collect(java.util.stream.Collectors.toCollection(ArrayList::new));
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to load coordinates from " + coordinateFilePath, e);
+        }
+        Shard initialShard = new Shard(coords);
         shardQueue.add(initialShard);
 
         System.out.println("Initial shard: " + initialShard);
@@ -57,143 +179,126 @@ public class ShardManager {
             Shard largestShard = shardQueue.poll();
 
             if (largestShard == null || largestShard.getNodeCount() <= 1) {
-                System.err.println("Warning: Cannot split further. " +
-                        "Shard has " + (largestShard != null ? largestShard.getNodeCount() : 0) + " nodes.");
+                System.err.println("Warning: Cannot split shard " + (largestShard == null ? "null" : largestShard) +
+                        " further due to insufficient nodes.");
                 if (largestShard != null) {
                     shardQueue.add(largestShard);
                 }
                 break;
             }
 
-            System.out.println("Splitting shard with " + largestShard.getNodeCount() +
-                    " nodes (width=" + largestShard.getWidth() +
-                    ", height=" + largestShard.getHeight() + ")");
+            System.out.println("Splitting shard " + largestShard);
 
             // Split the shard
-            Shard[] newShards = largestShard.split(coords);
+            Pair<Shard, Shard> splitShards = largestShard.split();
 
-            System.out.println("  -> Created: " + newShards[0] + " and " + newShards[1]);
-
-            // Add the new shards to the queue
-            for (Shard shard : newShards) {
-                if (shard.getNodeCount() > 0) {
-                    shardQueue.add(shard);
-                }
+            // If split failed (e.g., due to insufficient nodes), re-add the original shard
+            if (splitShards == null) {
+                System.err.println("Warning: Split resulted in null shards for " + largestShard);
+                shardQueue.add(largestShard);
+                break;
             }
-        }
 
-        // Assign shard IDs and store them
-        int shardId = 0;
-        nodeToShardId = new HashMap<>();
+            shardQueue.add(splitShards.getFirst());
+            shardQueue.add(splitShards.getSecond());
+        }
 
         for (Shard shard : shardQueue) {
-            shardAssignments.put(shardId, shard);
-
-            // Build node to shard mapping
-            for (int nodeId : shard.nodeIds) {
-                nodeToShardId.put(nodeId, shardId);
-            }
-
-            System.out.println("Shard " + shardId + ": " + shard);
-            shardId++;
+            int xMin = shard.getMinX();
+            int xMax = shard.getMaxX();
+            int yMin = shard.getMinY();
+            int yMax = shard.getMaxY();
+            shardBounds.add(new ShardBounds(xMin, xMax, yMin, yMax));
+            System.out.println("Created shard: " + shard);
         }
 
-        System.out.println("Created " + shardAssignments.size() + " shards.");
+        System.out.println("Created " + shardBounds.size() + " shards.");
     }
 
     /**
-     * Gets the shard ID for a given node.
+     * Returns the protobuf ShardData message for a shard.
      */
-    public int getShardIdForNode(int nodeId) {
-        return nodeToShardId.getOrDefault(nodeId, -1);
-    }
-
-    /**
-     * Gets a shard by its ID.
-     */
-    public Shard getShard(int shardId) {
-        return shardAssignments.get(shardId);
-    }
-
-    /**
-     * Gets all shard assignments.
-     */
-    public Map<Integer, Shard> getShardAssignments() {
-        return Collections.unmodifiableMap(shardAssignments);
-    }
-
-    /**
-     * Gets the node to shard ID mapping.
-     */
-    public Map<Integer, Integer> getNodeToShardMapping() {
-        return Collections.unmodifiableMap(nodeToShardId);
-    }
-
-    /**
-     * Returns the number of shards created.
-     */
-    public int getShardCount() {
-        return shardAssignments.size();
-    }
-
-    /**
-     * Retrieves the ShardData proto message for a specific shard.
-     * This is used by the LeaderService to respond to worker requests.
-     */
-    public com.graph.dist.proto.ShardData getShardData(int shardId) {
-        Shard shard = shardAssignments.get(shardId);
-        if (shard == null) {
+    public ShardData getShardData(int shardId) {
+        ShardBounds bounds;
+        try {
+            bounds = shardBounds.get(shardId);
+        } catch (IndexOutOfBoundsException e) {
+            // Invalid shard ID
+            System.err.println("Invalid shard ID requested: " + shardId);
             return null;
         }
-        return buildShardData(shardId, shard);
-    }
 
-    /**
-     * Builds the protobuf ShardData message for a shard.
-     */
-    private com.graph.dist.proto.ShardData buildShardData(int shardId, Shard shard) {
-        com.graph.dist.proto.ShardData.Builder builder = com.graph.dist.proto.ShardData.newBuilder();
+        ShardData.Builder builder = ShardData.newBuilder();
         builder.setShardId(shardId);
 
-        // Add nodes with their coordinates
-        for (int nodeId : shard.nodeIds) {
-            Point pt = coords.get(nodeId);
-            builder.addNodes(
-                    com.graph.dist.proto.Node.newBuilder()
-                            .setId(nodeId)
-                            .setX(pt.x)
-                            .setY(pt.y)
-                            .build());
+        HashSet<Integer> nodeIdsInShard = new HashSet<>();
+
+        try (var vertexStream = DimacsParser.streamVertices(coordinateFilePath)) {
+            builder.addAllNodes(
+                vertexStream
+                    .filter(v -> bounds.contains(v.point.x, v.point.y))
+                    .map(v -> {
+                        nodeIdsInShard.add(v.id);
+                        return Node.newBuilder()
+                            .setId(v.id)
+                            .setX(v.point.x)
+                            .setY(v.point.y)
+                            .build();})
+                    .toList());
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to load coordinates from " + coordinateFilePath, e);
         }
 
-        // Add edges that originate from nodes in this shard
-        Set<Integer> nodeSet = new HashSet<>(shard.nodeIds);
-        try (BufferedReader br = new BufferedReader(
-                new InputStreamReader(new GZIPInputStream(new FileInputStream(edgeFilePath))))) {
-            String line;
-            while ((line = br.readLine()) != null) {
-                if (line.startsWith("a ")) {
-                    String[] p = line.split("\\s+");
-                    int from = Integer.parseInt(p[1]);
+        try (var edgeStream = DimacsParser.streamEdges(edgeFilePath)) {
+            HashSet<Integer> nodesWithUnknownShard = new HashSet<>();
+            List<DimacsParser.Edge> edges = edgeStream
+                .filter(e -> { return nodeIdsInShard.contains(e.from); } )
+                .toList();
 
-                    if (nodeSet.contains(from)) {
-                        int to = Integer.parseInt(p[2]);
-                        int weight = Integer.parseInt(p[3]);
-                        int toShard = getShardIdForNode(to);
+            HashSet<Integer> nodesWithUknownShard = new HashSet<>();
 
-                        builder.addEdges(
-                                com.graph.dist.proto.Edge.newBuilder()
-                                        .setFrom(from)
-                                        .setTo(to)
-                                        .setToShard(toShard)
-                                        .setWeight(weight)
-                                        .build());
-                    }
+            for (DimacsParser.Edge e : edges) {
+                if (!nodeIdsInShard.contains(e.to)) {
+                    nodesWithUknownShard.add(e.to);
                 }
             }
+
+            HashMap<Integer, Integer> nodeIdToShardId = new HashMap<>();
+
+            try (var vertexStream = DimacsParser.streamVertices(coordinateFilePath)) {
+                vertexStream.forEach(
+                    v -> {
+                        if (nodesWithUknownShard.contains(v.id)) {
+                            for (int shardIdx = 0; shardIdx < shardBounds.size(); shardIdx++) {
+                                ShardBounds sb = shardBounds.get(shardIdx);
+                                if (sb.contains(v.point.x, v.point.y)) {
+                                    nodeIdToShardId.put(v.id, shardIdx);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                );
+            } catch (IOException e) {
+                throw new RuntimeException("Failed to load coordinates from " + coordinateFilePath, e);
+            }
+
+            builder.addAllEdges(
+                edges.stream().map(e -> {
+                    int toShardId = nodeIdsInShard.contains(e.to)
+                        ? shardId
+                        : nodeIdToShardId.get(e.to);
+                    return Edge.newBuilder()
+                        .setFrom(e.from)
+                        .setTo(e.to)
+                        .setToShard(toShardId)
+                        .setWeight(e.weight)
+                        .build();
+                }).toList()
+            );
+
         } catch (IOException e) {
-            System.err.println("Error reading edge file: " + e.getMessage());
-            // In a real app we might want to throw or handle this better
+            throw new RuntimeException("Failed to load edges from " + edgeFilePath, e);
         }
 
         return builder.build();

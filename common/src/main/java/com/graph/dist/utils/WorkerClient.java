@@ -118,6 +118,15 @@ public class WorkerClient {
         asyncStub.batchedUpdateDistanceToNode(batchRequest, responseObserver);
     }
 
+    public boolean hasNode(int nodeId) {
+        HasNodeRequest request = HasNodeRequest
+                .newBuilder()
+                .setNodeId(nodeId)
+                .build();
+        HasNodeResponse response = blockingStub.hasNode(request);
+        return response.getHasNode();
+    }
+
     public void shutdown() {
         channel.shutdown();
     }
