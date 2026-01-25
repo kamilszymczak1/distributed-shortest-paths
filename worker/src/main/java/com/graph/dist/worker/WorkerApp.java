@@ -274,7 +274,7 @@ public class WorkerApp {
 
         for (com.graph.dist.proto.Edge e : request.getEdgesList()) {
             // System.out.println("Processing edge from " + e.getFrom() + " to " + e.getTo()
-            // + " (to shard " + e.getToShard() + ") with weight " + e.getWeight());
+            //     + " (to shard " + e.getToShard() + ") with weight " + e.getWeight());
 
             int localIdFrom = globalIdToLocalId.get(e.getFrom());
             if (globalIdToLocalId.get(e.getTo()) == null) {
@@ -346,6 +346,9 @@ public class WorkerApp {
                 while (true) {
                     try {
                         OutOfShardUpdate update = updatesFromOtherShards.take();
+                        // System.out.println("Processing out-of-shard update for node "
+                        //         + update.toGlobalId + " with new distance " + update.distance);
+
                         numberOfProcessedUpdates++;
                         if (numberOfProcessedUpdates % 250 == 0) {
                             System.out.println(
@@ -437,14 +440,14 @@ public class WorkerApp {
                                         .setFromNode(fromGlobalId)
                                         .build());
 
-                                // 3. Check if THIS buffer is full
+                                // Check if THIS buffer is full
                                 if (buffer.size() >= BATCH_SIZE) {
                                     flushBuffer(targetShard, buffer, request.getQueryId());
                                 }
                             }
                         }
 
-                        // 4. Time-based Flush (for all shards)
+                        // Time-based Flush (for all shards)
                         // If we haven't flushed in a while, send everything pending
                         if (currentTime - lastFlushTime >= FLUSH_INTERVAL_MS) {
                             for (int shardId = 0; shardId < buffers.size(); shardId++) {
@@ -703,6 +706,20 @@ public class WorkerApp {
             GetIntraShardPathResponse response = GetIntraShardPathResponse.newBuilder()
                     .setDistance(distance)
                     .addAllPath(path)
+                    .build();
+
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();
+        }
+
+        @Override
+        public void hasNode(HasNodeRequest request,
+                StreamObserver<HasNodeResponse> responseObserver) {
+            int globalId = request.getNodeId();
+            boolean hasNode = globalIdToLocalId.containsKey(globalId);
+
+            HasNodeResponse response = HasNodeResponse.newBuilder()
+                    .setHasNode(hasNode)
                     .build();
 
             responseObserver.onNext(response);

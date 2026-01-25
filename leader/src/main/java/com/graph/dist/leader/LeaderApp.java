@@ -3,7 +3,6 @@ package com.graph.dist.leader;
 import com.graph.dist.proto.LeaderServiceGrpc;
 import com.graph.dist.proto.ShardData;
 import com.graph.dist.proto.ShardRequest;
-import com.graph.dist.utils.Point;
 import com.graph.dist.utils.WorkerClient;
 
 import io.grpc.Server;
@@ -15,7 +14,6 @@ import org.jgrapht.alg.util.Pair;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.Map;
 import io.javalin.Javalin;
 
 public class LeaderApp {
@@ -47,17 +45,9 @@ public class LeaderApp {
     public static void main(String[] args) throws Exception {
         System.out.println("Leader starting...");
 
-        Map<Integer, Point> coords = null;
-        String coPath = "/data/graph.co.gz";
-        String grPath = "/data/graph.gr.gz";
+        String coordinateFileName = "/data/graph.co.gz";
+        String edgesFileName = "/data/graph.gr.gz";
 
-        try {
-            coords = DimacsParser.parseCoordinates(coPath);
-            System.out.println("Graph coordinates parsed with " + coords.size() + " coordinates.");
-        } catch (Exception e) {
-            System.err.println("Failed to parse graph: " + e.getMessage());
-            return;
-        }
 
         int numWorkers = getNumWorkers();
 
@@ -69,11 +59,10 @@ public class LeaderApp {
         }
 
         // Create shards
-        shardManager = new ShardManager(coords, grPath, numWorkers);
+        shardManager = new ShardManager(coordinateFileName, edgesFileName, numWorkers);
         shardManager.createShards();
 
         apiHandler = new ApiHandler();
-
         Javalin app = Javalin.create().start(8080);
         app.get("/shortest-path", apiHandler::handleShortestPath);
 
@@ -129,16 +118,26 @@ public class LeaderApp {
         }
     }
 
+    private static Integer getShardIdForNode(int nodeId) {
+        for (int shardId = 0; shardId < getNumWorkers(); shardId++) {
+            if (workerClients.get(shardId).hasNode(nodeId)) {
+                return shardId;
+            }
+        }
+        return null;
+    }
+
     public static ShortestPathResult findShortestPath(int fromId, int toId) {
         int numWorkers = LeaderApp.getNumWorkers();
 
-        int fromShard = shardManager.getShardIdForNode(fromId);
-        int toShard = shardManager.getShardIdForNode(toId);
+        Integer fromShard = getShardIdForNode(fromId);
+        Integer toShard = getShardIdForNode(toId);
 
-        if (fromShard == -1) {
+
+        if (fromShard == null) {
             throw new IllegalArgumentException("Start node " + fromId + " not found in any shard.");
         }
-        if (toShard == -1) {
+        if (toShard == null) {
             throw new IllegalArgumentException("End node " + toId + " not found in any shard.");
         }
 

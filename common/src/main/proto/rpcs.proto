@@ -70,6 +70,14 @@ message IsWorkerDoneResponse {
   bool done = 1;
 }
 
+message HasNodeRequest {
+  int32 nodeId = 1;
+}
+
+message HasNodeResponse {
+  bool hasNode = 1;
+}
+
 service GraphService {
   rpc PrepareForNewQuery(PrepareForNewQueryRequest) returns (PrepareForNewQueryResponse);
   rpc BatchedUpdateDistanceToNode(BatchedUpdateDistanceToNodeRequest) returns (BatchedUpdateDistanceToNodeResponse);
@@ -78,6 +86,7 @@ service GraphService {
   rpc GetIntraShardPath(GetIntraShardPathRequest) returns (GetIntraShardPathResponse);
   rpc TracePath(TracePathRequest) returns (TracePathResponse);
   rpc IsWorkerDone(IsWorkerDoneRequest) returns (IsWorkerDoneResponse);
+  rpc HasNode(HasNodeRequest) returns (HasNodeResponse);
 }
 
 message Node {
