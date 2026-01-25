@@ -1,9 +1,7 @@
 package com.graph.dist.worker;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.HashMap;
-import java.util.PriorityQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -25,16 +23,6 @@ import io.grpc.ServerBuilder;
 import io.grpc.stub.StreamObserver;
 
 public class WorkerApp {
-
-    public static class InternalEdge {
-        public int toLocalId;
-        public int weight;
-
-        public InternalEdge(int toLocalId, int weight) {
-            this.toLocalId = toLocalId;
-            this.weight = weight;
-        }
-    }
 
     public static class ShortestPathSource {
         public static enum Type {
@@ -106,7 +94,7 @@ public class WorkerApp {
 
     static int myShardId;
     static HashMap<Integer, Integer> globalIdToLocalId = new HashMap<>();
-    static ArrayList<ArrayList<InternalEdge>> localOutBoundEdges, localOutBoundEdgesRev;
+    static ArrayList<ArrayList<DijkstraUtil.Edge>> localOutBoundEdges, localOutBoundEdgesRev;
     static ArrayList<ArrayList<OutOfShardEdge>> localOutOfShardEdges;
     static int[] localIdToGlobalId, localIdtoBoundaryId, boundaryIdtoLocalId;
     static int numLocalNodes, numBoundaryNodes;
@@ -291,8 +279,8 @@ public class WorkerApp {
             } else {
                 // This is an internal edge
                 int localIdTo = globalIdToLocalId.get(e.getTo());
-                localOutBoundEdges.get(localIdFrom).add(new InternalEdge(localIdTo, e.getWeight()));
-                localOutBoundEdgesRev.get(localIdTo).add(new InternalEdge(localIdFrom, e.getWeight()));
+                localOutBoundEdges.get(localIdFrom).add(new DijkstraUtil.Edge(localIdTo, e.getWeight()));
+                localOutBoundEdgesRev.get(localIdTo).add(new DijkstraUtil.Edge(localIdFrom, e.getWeight()));
             }
         }
 
@@ -743,39 +731,8 @@ public class WorkerApp {
         }
     }
 
-    static Pair<int[], int[]> dijkstra(int sourceLocalId, ArrayList<ArrayList<InternalEdge>> localEdges) {
-        int[] dist = new int[numLocalNodes];
-        int[] from = new int[numLocalNodes];
-        boolean[] visited = new boolean[numLocalNodes];
-        for (int i = 0; i < numLocalNodes; i++) {
-            dist[i] = Integer.MAX_VALUE;
-            visited[i] = false;
-            from[i] = -1;
-        }
-        dist[sourceLocalId] = 0;
-
-        PriorityQueue<Pair<Integer, Integer>> pq = new PriorityQueue<>(distBoundary.length,
-                Comparator.comparing(Pair::getFirst));
-        pq.add(new Pair<>(0, sourceLocalId));
-
-        while (!pq.isEmpty()) {
-            Pair<Integer, Integer> p = pq.poll();
-            int currentDist = p.getFirst();
-            int localId = p.getSecond();
-            if (visited[localId])
-                continue;
-            visited[localId] = true;
-            for (InternalEdge v : localEdges.get(localId)) {
-                if (visited[v.toLocalId])
-                    continue;
-                int newDist = currentDist + v.weight;
-                if (newDist < dist[v.toLocalId]) {
-                    dist[v.toLocalId] = newDist;
-                    pq.add(new Pair<>(newDist, v.toLocalId));
-                    from[v.toLocalId] = localId;
-                }
-            }
-        }
-        return new Pair<>(dist, from);
+    static Pair<int[], int[]> dijkstra(int sourceLocalId, ArrayList<ArrayList<DijkstraUtil.Edge>> localEdges) {
+        DijkstraUtil.DijkstraResult result = DijkstraUtil.dijkstra(sourceLocalId, localEdges, numLocalNodes);
+        return new Pair<>(result.distances, result.predecessors);
     }
 }
