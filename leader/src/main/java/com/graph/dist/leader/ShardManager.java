@@ -255,11 +255,9 @@ public class ShardManager {
                 .filter(e -> { return nodeIdsInShard.contains(e.from); } )
                 .toList();
 
-            HashSet<Integer> nodesWithUknownShard = new HashSet<>();
-
             for (DimacsParser.Edge e : edges) {
                 if (!nodeIdsInShard.contains(e.to)) {
-                    nodesWithUknownShard.add(e.to);
+                    nodesWithUnknownShard.add(e.to);
                 }
             }
 
@@ -268,7 +266,7 @@ public class ShardManager {
             try (var vertexStream = DimacsParser.streamVertices(coordinateFilePath)) {
                 vertexStream.forEach(
                     v -> {
-                        if (nodesWithUknownShard.contains(v.id)) {
+                        if (nodesWithUnknownShard.contains(v.id)) {
                             for (int shardIdx = 0; shardIdx < shardBounds.size(); shardIdx++) {
                                 ShardBounds sb = shardBounds.get(shardIdx);
                                 if (sb.contains(v.point.x, v.point.y)) {

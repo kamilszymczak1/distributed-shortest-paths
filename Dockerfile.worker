@@ -25,12 +25,9 @@ RUN mvn clean package -DskipTests
 FROM eclipse-temurin:17-jre-jammy
 WORKDIR /app
 
-# This argument tells Docker which JAR to grab (leader or worker)
-ARG MODULE_NAME
-
 # Copy the specific JAR from the builder stage
 # We rename it to 'app.jar' for simplicity in the ENTRYPOINT
-COPY --from=builder /app/${MODULE_NAME}/target/${MODULE_NAME}-1.0-SNAPSHOT.jar app.jar
+COPY --from=builder /app/worker/target/worker-1.0-SNAPSHOT.jar app.jar
 
 # Expose the gRPC port
 EXPOSE 9090

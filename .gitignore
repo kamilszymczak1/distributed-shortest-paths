@@ -1,4 +1,5 @@
 data/*
+!data/mock_graph.png
 leader/dependency-reduced-pom.xml
 worker/dependency-reduced-pom.xml
 common/target/*
