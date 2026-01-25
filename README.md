@@ -5,7 +5,7 @@
 To run the app locally, you need:
 - **Java 17** or later
 - **Maven** 3.9+
-- **Docker** (for containerized deployment)
+- **Docker**
 - **minikube** and **kubectl** (for Kubernetes deployment)
 
 #### Installing minikube (for Kubernetes)
@@ -26,8 +26,14 @@ rm kubectl
 
 ### Downloading the graph
 
-In order for the leader to read the graph, you have to download it first.
-You can download it [here](https://www.diag.uniroma1.it/challenge9/download.shtml).
+The files in `./data/` correspond to a very small mock graph which looks like this:
+
+![Mock Graph](./data/mock_graph.png)
+
+(all the edges are undirected).
+
+In order to use a larger graph, you have to download it first.
+You can download it from [here](https://www.diag.uniroma1.it/challenge9/download.shtml).
 You need to put the file with coordinates under `./data/graph.co.gz` and the one
 with arcs under `./data/graph.gr.gz` for the Docker containers to work properly.
 
@@ -44,21 +50,6 @@ java -jar worker/target/worker-1.0-SNAPSHOT.jar
 ```
 and similarly for the leader. However ***running the apps this way is discouraged***
 as it would be quite difficult to make the workers communicate with the leader. Instead,
-you can create Docker containers that will make setting everything up quite seamless.
-
-### Running with Docker Compose
-
-To create the Docker containers run
-```
-chmod +x docker_build.sh
-./docker_build.sh
-```
-after that you can just run
-```
-docker compose up
-```
-which will run the leader and the workers. You can observe
-their outputs in the terminal.
 
 ### Running with Kubernetes (minikube) - Recommended
 
@@ -90,7 +81,7 @@ minikube start --driver=docker --cpus=4 --memory=4096 --disk-size=20g
 This script will:
 - Mount your `./data` directory to minikube
 - Create the namespace and all Kubernetes resources
-- Start 3 workers and then the leader job
+- Start the workers and then the leader job
 
 #### Useful kubectl commands
 
@@ -105,7 +96,7 @@ kubectl get pods -n graph-dist -w
 kubectl logs -n graph-dist -l app=graph-leader -f
 
 # View worker logs
-kubectl logs -n graph-dist worker-0
+kubectl logs -n graph-dist worker-0 -f
 ```
 
 #### Cleaning up
@@ -142,7 +133,7 @@ gcloud container clusters get-credentials graph-cluster --zone us-central1-a
 
 ```bash
 # Build images locally first
-./docker_build.sh
+./k8s_build.sh
 
 # Tag images for GCR
 docker tag graph-worker:v1 gcr.io/YOUR_PROJECT_ID/graph-worker:v1
@@ -166,6 +157,7 @@ docker push gcr.io/YOUR_PROJECT_ID/graph-leader:v1
    ```bash
    kubectl apply -f k8s/namespace.yaml
    kubectl apply -f k8s/configmap.yaml
+   kubectl apply -f k8s/leader-service.yaml
    kubectl apply -f k8s/worker-statefulset.yaml
    kubectl apply -f k8s/leader-job.yaml
    ```
@@ -196,41 +188,26 @@ The leader exposes a REST API for finding the shortest path between two nodes in
 
 You can use `curl` to send a request to the API.
 
-If you are running the application with Docker Compose, the API will be available on `http://localhost:8080`.
+If you are running the application with minikube, the API will be available on `http://localhost:8080`.
 
 ```bash
-curl "http://localhost:8080/shortest-path?from=1&to=100"
+curl "http://localhost:8080/shortest-path?from=1&to=7"
 ```
-
-If you are running the application on Kubernetes with minikube, the `k8s_deploy.sh` script automatically starts port-forwarding for you.
-
-After the script finishes, the `leader`'s API will be available at `http://localhost:8080`.
-
-You can then use `curl` or your web browser to access the API.
-
-```bash
-curl "http://localhost:8080/shortest-path?from=1&to=100"
-```
-
-The port-forwarding runs in the background. The script will print the process ID (PID) of the background job and a command to stop it.
 
 #### Using a Web Browser
 
 You can also open the URL in your web browser:
 ```
-http://localhost:8080/shortest-path?from=1&to=100
+http://localhost:8080/shortest-path?from=1&to=7
 ```
-
-
 
 ### Example Response
 
 The API will return a JSON object with the distance and the path.
-**Note:** The current implementation is a placeholder and will return a dummy response.
 
 ```json
 {
-  "distance": 0.0,
-  "path": []
+  "distance" : 35,
+  "path": [1,2,5,9,8,7]
 }
 ```
